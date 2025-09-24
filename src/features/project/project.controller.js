@@ -86,3 +86,19 @@ exports.stopSharing = async (req, res) => {
         res.status(400).json({ message: "Erro ao remover compartilhamento", error: error.message });
     }
 };
+
+/**
+ * Registra um valor como recebido pelo usuário logado (dono ou parceiro).
+ */
+exports.registerReceipt = async (req, res) => {
+    try {
+        const projectId = req.params.id;
+        const userId = req.user.id;
+        const { amount, isFullPayment } = req.body; // amount é o valor a ser adicionado
+
+        const updatedProject = await projectService.registerUserReceipt(projectId, userId, amount, isFullPayment);
+        res.status(200).json(updatedProject);
+    } catch (error) {
+        res.status(400).json({ message: "Erro ao registrar recebimento", error: error.message });
+    }
+};

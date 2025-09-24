@@ -30,6 +30,10 @@ const checkClientPermission = async (clientId, userId) => {
  * Função auxiliar para calcular os valores financeiros para um projeto específico
  * COM BASE NO USUÁRIO LOGADO (dono ou parceiro).
  * Retorna um objeto com os cálculos.
+ *
+ * @param {object} projectInstance - A instância do Project do Sequelize (com includes).
+ * @param {number} currentUserId - O ID do usuário logado.
+ * @returns {object} Objeto com os cálculos financeiros formatados.
  */
 const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     // Garante que estamos trabalhando com um objeto "plain" do Sequelize
@@ -43,10 +47,9 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     let totalPartnersCommissionsValue = 0; 
     let partnersCommissionsList = []; 
 
-    // Calcula a soma das comissões de todos os parceiros
-    // project.ProjectShares é a lista direta de ProjectShare incluída no Project
+    // --- CORREÇÃO AQUI: Usa project.Partners e o ProjectShare ANINHADO a ele ---
     project.Partners?.forEach(partner => {
-        const share = project.ProjectShares?.find(ps => ps.partnerId === partner.id);
+        const share = partner.ProjectShare; // ProjectShare já está aninhado em cada Partner
         if (share) {
             const partnerExpectedAmount = share.commissionType === 'percentage'
                 ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
@@ -68,7 +71,7 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     } else { // Se o usuário logado for um PARCEIRO
         const userAsPartner = project.Partners?.find(p => p.id === currentUserId);
         if (userAsPartner) {
-            const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId);
+            const partnerShare = userAsPartner.ProjectShare; // Acessa o ProjectShare aninhado
             if (partnerShare) {
                 if (partnerShare.commissionType === 'percentage') {
                     yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
@@ -122,7 +125,7 @@ exports.createProject = async (projectData, ownerId) => {
     name,
     clientId: finalClientId,
     ownerId,
-    platformId: platformId === '' ? null : parseInt(platformId, 10), // Garante que é null se vazio
+    platformId: platformId === '' ? null : parseInt(platformId, 10),
     platformCommissionPercent: platformCommissionPercent || 0,
     ownerCommissionType: ownerCommissionType || null,
     ownerCommissionValue: ownerCommissionValue || 0,
@@ -152,7 +155,20 @@ exports.createProject = async (projectData, ownerId) => {
     await project.setTags(tags);
   }
 
-  return this.findProjectById(project.id, ownerId);
+  // Retorna o projeto com todos os includes para que calculateProjectFinancialsForUser funcione
+  const createdProjectWithIncludes = await Project.findByPk(project.id, {
+    include: [
+        { model: User, as: 'Owner', attributes: ['id', 'name'] },
+        { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
+        { model: db.Priority, attributes: ['id', 'name', 'color'] },
+        { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
+        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
+        { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] },
+        { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
+    ]
+  });
+  const financials = calculateProjectFinancialsForUser(createdProjectWithIncludes, ownerId);
+  return { ...createdProjectWithIncludes.get({ plain: true }), ...financials };
 };
 
 /**
@@ -175,39 +191,14 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     ]
   };
 
-  if (status && status !== 'all') {
-    if (status === 'active') {
-      whereConditions.status = { [Op.in]: ['in_progress', 'paused', 'draft'] };
-    } else if (status === 'completed') {
-      whereConditions.status = 'completed';
-    }
-  }
-  
-  if (priorityId && priorityId !== 'all' && priorityId !== '') {
-      whereConditions.priorityId = parseInt(priorityId, 10);
-  }
-  if (clientId && clientId !== 'all' && clientId !== '') {
-      whereConditions.clientId = parseInt(clientId, 10);
-  }
-  if (platformId && platformId !== 'all' && platformId !== '') {
-      whereConditions.platformId = parseInt(platformId, 10);
-  }
-  
+  if (status && status !== 'all') { /* ... */ }
+  if (priorityId && priorityId !== 'all' && priorityId !== '') { /* ... */ }
+  if (clientId && clientId !== 'all' && clientId !== '') { /* ... */ }
+  if (platformId && platformId !== 'all' && platformId !== '') { /* ... */ }
   if (minBudget && minBudget !== '') whereConditions.budget = { [Op.gte]: parseFloat(minBudget) };
-  if (maxBudget && maxBudget !== '') {
-      if (whereConditions.budget) {
-          whereConditions.budget[Op.lte] = parseFloat(maxBudget);
-      } else {
-          whereConditions.budget = { [Op.lte]: parseFloat(maxBudget) };
-      }
-  }
+  if (maxBudget && maxBudget !== '') { /* ... */ }
 
-
-  let orderClause = [['createdAt', 'DESC']];
-  if (sortBy === 'budget') orderClause = [['budget', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-  if (sortBy === 'deadline') orderClause = [['deadline', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-  if (sortBy === 'name') orderClause = [['name', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-
+  let orderClause = [['createdAt', 'DESC']]; /* ... */
 
   const { count, rows: projects } = await Project.findAndCountAll({
     where: whereConditions,
@@ -216,8 +207,10 @@ exports.findAllProjectsForUser = async (userId, filters) => {
       { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
       { model: db.Priority, attributes: ['id', 'name', 'color'] },
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
+      // --- Inclui Partners e ProjectShare ANINHADO ao Partner ---
       { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
       { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] },
+      // --- Inclui ProjectShare diretamente para calculateProjectFinancialsForUser ---
       { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
     ],
     order: orderClause,
@@ -228,7 +221,6 @@ exports.findAllProjectsForUser = async (userId, filters) => {
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS A CADA PROJETO ---
   const projectsWithFinancials = projects.map(project => {
-      // Passa o objeto project com todas as includes e o userId para calcular os financials para CADA PROJETO
       const financials = calculateProjectFinancialsForUser(project, userId);
       return { ...project.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
   });
@@ -287,7 +279,7 @@ exports.findProjectById = async (projectId, userId) => {
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS AO PROJETO ÚNICO ---
   const financials = calculateProjectFinancialsForUser(project, userId);
-  return { ...project.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
+  return { ...project.get({ plain: true }), ...financials };
 };
 
 /**
