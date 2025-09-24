@@ -8,7 +8,7 @@ const Tag = db.Tag;
 const ProjectShare = db.ProjectShare;
 const Collaboration = db.Collaboration;
 const Transaction = db.Transaction;
-const Platform = db.Platform; // Importar Platform
+const Platform = db.Platform;
 
 // Função auxiliar para verificar permissão de acesso a um cliente
 const checkClientPermission = async (clientId, userId) => {
@@ -32,7 +32,7 @@ exports.createProject = async (projectData, ownerId) => {
       name, clientId, isNewClient, newClientName, tagIds, 
       partnerId, commissionType, commissionValue, // Comissão do PARCEIRO
       platformId, platformCommissionPercent, // Comissão da PLATAFORMA
-      ownerCommissionType, ownerCommissionValue, // Comissão do DONO
+      ownerCommissionType, ownerCommissionValue, // Comissão do DONO (se aplicável)
       ...restOfData 
   } = projectData;
 
@@ -61,7 +61,7 @@ exports.createProject = async (projectData, ownerId) => {
     paymentDetails: {
         client: { status: 'unpaid', amountPaid: 0 },
         owner: { status: 'unpaid', amountReceived: 0 },
-        partners: {}
+        partners: {} // Objeto para parceiros: { partnerId: { status: 'unpaid', amountReceived: 0 } }
     }
   });
 
@@ -74,8 +74,8 @@ exports.createProject = async (projectData, ownerId) => {
             commissionType, 
             commissionValue, 
             permissions: 'edit',
-            paymentStatus: 'unpaid', // Valor padrão
-            amountPaid: 0.00 // Valor padrão
+            paymentStatus: 'unpaid',
+            amountPaid: 0.00
           } 
       });
   }
@@ -123,7 +123,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   
   const summary = allFilteredProjects.reduce((acc, project) => {
     acc.totalBudget += parseFloat(project.budget || 0);
-    // Sumário de recebidos baseado apenas no cliente para consistência
+    // Total recebido do CLIENTE (para o summary)
     acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
     return acc;
   }, { totalBudget: 0, totalReceived: 0 });
@@ -136,8 +136,9 @@ exports.findAllProjectsForUser = async (userId, filters) => {
       { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
       { model: db.Priority, attributes: ['id', 'name', 'color'] },
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-      { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
-      { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] } // Inclui a plataforma
+      // Inclui os detalhes da ProjectShare para cada parceiro
+      { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
+      { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] }
     ],
     order: [['createdAt', 'DESC']],
     limit: parseInt(limit, 10),
@@ -166,15 +167,15 @@ exports.findProjectById = async (projectId, userId) => {
         { model: Client }, 
         { model: db.Priority, attributes: ['id', 'name', 'color'] },
         { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
+        // Inclui os detalhes da ProjectShare para cada parceiro
+        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
         { model: Transaction, as: 'Transactions', order: [['paymentDate', 'DESC']] },
-        { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] }, // Inclui a plataforma
-        { model: db.ProjectShare, as: 'ProjectShares' } // Necessário para validação de acesso
+        { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] }
     ]
   });
   if (!project) throw new Error("Projeto não encontrado.");
   const isOwner = project.ownerId === userId;
-  const isPartner = project.Partners.some(p => p.id === userId); // Verifica se está na lista de Partners
+  const isPartner = project.Partners.some(p => p.id === userId);
   if (!isOwner && !isPartner) {
     throw new Error("Acesso negado. Você não tem permissão para ver este projeto.");
   }
@@ -186,42 +187,35 @@ exports.findProjectById = async (projectId, userId) => {
  */
 exports.updateProject = async (projectId, updateData, userId) => {
   const project = await this.findProjectById(projectId, userId);
-  const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData; // Extrai dados de parceria para tratar separado
+  const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData; 
 
-  // Validação de acesso para edição
   const shareInfo = await ProjectShare.findOne({ where: { projectId, partnerId: userId } });
   const isOwner = project.ownerId === userId;
   const canEdit = isOwner || (shareInfo && shareInfo.permissions === 'edit');
+
   if (!canEdit) {
     throw new Error("Acesso negado. Você não tem permissão para editar este projeto.");
   }
 
-  // Garante que priorityId seja nulo se for uma string vazia ou undefined
   const finalPriorityId = priorityId === '' || priorityId === undefined ? null : parseInt(priorityId, 10);
   
-  // Atualiza as tags
   if (tagIds) {
     const tags = await Tag.findAll({ where: { id: tagIds, userId: project.ownerId } });
     await project.setTags(tags);
   }
 
-  // --- Lógica para atualizar a comissão de parceria (se mudou no formulário de edição) ---
-  if (partnerId) { // Se um partnerId foi enviado, tenta atualizar ou adicionar
-      const partnerShareEntry = await ProjectShare.findOne({ where: { projectId: project.id, partnerId: partnerId } });
-      if (partnerShareEntry) {
-          // Atualiza dados da ProjectShare existente
-          await partnerShareEntry.update({ 
-              commissionType: commissionType || partnerShareEntry.commissionType, 
-              commissionValue: parseFloat(commissionValue) || partnerShareEntry.commissionValue 
-          });
-      } else {
-          // Se o parceiro foi adicionado, cria a entrada de compartilhamento
+  // --- Lógica para atualizar a comissão de parceria ---
+  if (partnerId) { // Se um parceiro foi selecionado/mantido
+      const existingPartnerShare = await ProjectShare.findOne({ where: { projectId: project.id, partnerId: partnerId } });
+      if (existingPartnerShare) {
+          await existingPartnerShare.update({ commissionType, commissionValue: parseFloat(commissionValue) });
+      } else { // Se for um NOVO parceiro adicionado via edição
           const partner = await User.findByPk(partnerId);
           if (!partner) throw new Error("Parceiro de colaboração não encontrado.");
           await project.addPartner(partner, {
               through: { 
-                commissionType: commissionType || 'percentage', // Padrão se não informado
-                commissionValue: parseFloat(commissionValue) || 0.00,
+                commissionType, 
+                commissionValue: parseFloat(commissionValue), 
                 permissions: 'edit',
                 paymentStatus: 'unpaid',
                 amountPaid: 0.00
@@ -229,9 +223,10 @@ exports.updateProject = async (projectId, updateData, userId) => {
           });
       }
   } else if (!partnerId && project.Partners && project.Partners.length > 0) {
-      // Se o partnerId foi removido (e havia parceiros antes), remove todas as associações de parceiros.
-      // Em um sistema real, o front-end deveria enviar qual parceiro remover especificamente.
-      // Aqui, para simplicidade, se o partnerId do formData estiver vazio, removemos todos os parceiros existentes.
+      // Se o parceiro foi removido do formulário (e havia um), remove a associação
+      // Simplificado: Assumindo que só há um parceiro ou que a lógica é mais complexa no front para remover um específico.
+      // Para múltiplos parceiros, o front-end precisaria gerenciar qual remover.
+      // Por simplicidade, se partnerId é null e havia parceiros, remove todos os parceiros do projeto
       for (const p of project.Partners) {
           await project.removePartner(p.id);
       }
