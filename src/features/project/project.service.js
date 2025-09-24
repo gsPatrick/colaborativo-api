@@ -93,7 +93,7 @@ exports.createProject = async (projectData, ownerId) => {
  * Lista todos os projetos de um usuário com filtros, paginação e sumário.
  */
 exports.findAllProjectsForUser = async (userId, filters) => {
-  const { status, priorityId, deadline, clientId, page = 1, limit = 6 } = filters;
+  const { status, priorityId, clientId, platformId, minBudget, maxBudget, sortBy, sortOrder, page = 1, limit = 6 } = filters;
   const offset = (page - 1) * limit;
 
   const sharedProjectShares = await ProjectShare.findAll({
@@ -118,16 +118,53 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   }
   if (priorityId) whereConditions.priorityId = priorityId;
   if (clientId) whereConditions.clientId = clientId;
+  if (platformId) whereConditions.platformId = platformId;
+  
+  if (minBudget) whereConditions.budget = { [Op.gte]: parseFloat(minBudget) };
+  if (maxBudget) {
+      if (whereConditions.budget) {
+          whereConditions.budget[Op.lte] = parseFloat(maxBudget);
+      } else {
+          whereConditions.budget = { [Op.lte]: parseFloat(maxBudget) };
+      }
+  }
+
+
+  let orderClause = [['createdAt', 'DESC']]; // Padrão
+  if (sortBy === 'budget') orderClause = [['budget', sortOrder === 'asc' ? 'ASC' : 'DESC']];
+  if (sortBy === 'deadline') orderClause = [['deadline', sortOrder === 'asc' ? 'ASC' : 'DESC']];
+  if (sortBy === 'name') orderClause = [['name', sortOrder === 'asc' ? 'ASC' : 'DESC']];
+
 
   const allFilteredProjects = await Project.findAll({ where: whereConditions });
   
   const summary = allFilteredProjects.reduce((acc, project) => {
-    acc.totalBudget += parseFloat(project.budget || 0);
-    // Total recebido do CLIENTE (para o summary)
-    acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
+    const budget = parseFloat(project.budget || 0);
+    const platformCommissionPercent = parseFloat(project.platformCommissionPercent || 0);
+    const platformFee = budget * (platformCommissionPercent / 100);
+
+    let netAmountAfterPlatform = budget - platformFee;
+    let totalPartnersCommissions = 0;
+
+    project.ProjectShares?.forEach(share => { // project.ProjectShares é um array de ProjectShare
+        const partnerExpectedAmount = share.commissionType === 'percentage'
+            ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
+            : parseFloat(share.commissionValue);
+        totalPartnersCommissions += partnerExpectedAmount;
+    });
+
+    const ownerExpectedAmount = netAmountAfterPlatform - totalPartnersCommissions; // Lucro líquido do dono
+
+    acc.totalBudget += budget; // Valor total bruto do projeto
+    acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0); // O que o cliente pagou
+    acc.totalToReceiveByOwner += ownerExpectedAmount; // O que o dono deve receber líquido
+    acc.totalReceivedByOwner += parseFloat(project.paymentDetails?.owner?.amountReceived || 0); // O que o dono JÁ recebeu
+
     return acc;
-  }, { totalBudget: 0, totalReceived: 0 });
-  summary.totalToReceive = summary.totalBudget - summary.totalReceived;
+  }, { totalBudget: 0, totalReceived: 0, totalToReceiveByOwner: 0, totalReceivedByOwner: 0 });
+
+  summary.remainingToReceiveByOwner = summary.totalToReceiveByOwner - summary.totalReceivedByOwner;
+
 
   const { count, rows: projects } = await Project.findAndCountAll({
     where: whereConditions,
@@ -136,18 +173,23 @@ exports.findAllProjectsForUser = async (userId, filters) => {
       { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
       { model: db.Priority, attributes: ['id', 'name', 'color'] },
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-      // Inclui os detalhes da ProjectShare para cada parceiro
       { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
-      { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] }
+      { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] }, // Inclui a plataforma completa
+      { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] } // Para acessar o ProjectShare diretamente aqui
     ],
-    order: [['createdAt', 'DESC']],
+    order: orderClause,
     limit: parseInt(limit, 10),
     offset: parseInt(offset, 10),
     distinct: true
   });
 
   return {
-    summary,
+    summary: {
+        totalBudget: summary.totalBudget,
+        totalReceived: summary.totalReceived, // Total recebido do cliente
+        totalToReceive: summary.totalToReceiveByOwner, // O que o DONO vai receber líquido
+        remainingToReceive: summary.remainingToReceiveByOwner // O que o DONO falta receber líquido
+    },
     pagination: {
       totalProjects: count,
       totalPages: Math.ceil(count / limit),
@@ -156,6 +198,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     projects
   };
 };
+
 
 /**
  * Busca um projeto pelo ID, validando a permissão do usuário.
