@@ -1,6 +1,7 @@
 const db = require('../../models');
 const Project = db.Project;
 const Transaction = db.Transaction;
+const ProjectShare = db.ProjectShare; // Importa ProjectShare
 
 
 const checkProjectAccessForTransactions = async (projectId, userId) => {
