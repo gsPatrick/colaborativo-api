@@ -3,20 +3,29 @@ const Project = db.Project;
 const Transaction = db.Transaction;
 
 
+const checkProjectAccessForTransactions = async (projectId, userId) => {
+    const project = await Project.findByPk(projectId, { include: [ProjectShare] });
+    if (!project) throw new Error("Projeto não encontrado.");
+
+    const isOwner = project.ownerId === userId;
+    const isPartner = project.ProjectShares.some(share => share.partnerId === userId);
+
+    if (!isOwner && !isPartner) {
+        throw new Error("Acesso negado. Você não tem permissão para este projeto.");
+    }
+    return project; // Retorna o projeto se tiver acesso
+};
+
+
 // --- FUNÇÃO NOVA ---
 exports.findAllTransactionsByProject = async (projectId, userId) => {
-    // Primeiro, verifica se o usuário tem acesso ao projeto
-    const project = await Project.findByPk(projectId);
-    if (!project || project.ownerId !== userId) { // Simplificado: apenas o dono vê o histórico
-        throw new Error("Projeto não encontrado ou acesso negado.");
-    }
+    // Usa a nova função de verificação de acesso
+    await checkProjectAccessForTransactions(projectId, userId);
 
-    // Se tiver acesso, busca as transações
     const transactions = await Transaction.findAll({
         where: { projectId },
-        order: [['paymentDate', 'DESC']] // Ordena da mais recente para a mais antiga
+        order: [['paymentDate', 'DESC']]
     });
-
     return transactions;
 };
 
@@ -45,11 +54,16 @@ const updateProjectPaymentStatus = async (projectId, transaction) => {
 };
 
 exports.createTransaction = async (projectId, userId, transactionData) => {
-    const t = await db.sequelize.transaction(); // Inicia uma transação do Sequelize
+    const t = await db.sequelize.transaction();
     try {
-        const project = await Project.findByPk(projectId);
-        if (!project || project.ownerId !== userId) { // Simplificado: apenas o dono pode adicionar transações
-            throw new Error("Projeto não encontrado ou acesso negado.");
+        // Usa a nova função de verificação de acesso
+        const project = await checkProjectAccessForTransactions(projectId, userId);
+        
+        // CORREÇÃO: Garante que apenas quem tem permissão de edição possa criar
+        const isOwner = project.ownerId === userId;
+        const partnerShare = project.ProjectShares.find(share => share.partnerId === userId);
+        if (!isOwner && (!partnerShare || partnerShare.permissions !== 'edit')) {
+            throw new Error("Acesso negado. Você não tem permissão para registrar transações neste projeto.");
         }
 
         const newTransaction = await Transaction.create({
@@ -57,13 +71,12 @@ exports.createTransaction = async (projectId, userId, transactionData) => {
             projectId,
         }, { transaction: t });
 
-        // Atualiza o status do projeto DENTRO da mesma transação de banco de dados
         await updateProjectPaymentStatus(projectId, t);
 
-        await t.commit(); // Se tudo deu certo, confirma as alterações no banco
+        await t.commit();
         return newTransaction;
     } catch (error) {
-        await t.rollback(); // Se algo deu errado, desfaz tudo
+        await t.rollback();
         throw error;
     }
 };
@@ -72,14 +85,21 @@ exports.deleteTransaction = async (transactionId, userId) => {
     const t = await db.sequelize.transaction();
     try {
         const transaction = await Transaction.findByPk(transactionId, { include: [Project] });
-        if (!transaction || transaction.Project.ownerId !== userId) {
-            throw new Error("Transação não encontrada ou acesso negado.");
+        if (!transaction) throw new Error("Transação não encontrada.");
+
+        // Usa a nova função de verificação de acesso para o projeto da transação
+        const project = await checkProjectAccessForTransactions(transaction.projectId, userId);
+
+        // CORREÇÃO: Garante que apenas quem tem permissão de edição possa deletar
+        const isOwner = project.ownerId === userId;
+        const partnerShare = project.ProjectShares.find(share => share.partnerId === userId);
+        if (!isOwner && (!partnerShare || partnerShare.permissions !== 'edit')) {
+            throw new Error("Acesso negado. Você não tem permissão para deletar transações neste projeto.");
         }
         
         const projectId = transaction.projectId;
         await transaction.destroy({ transaction: t });
         
-        // Atualiza o status do projeto DENTRO da mesma transação
         await updateProjectPaymentStatus(projectId, t);
 
         await t.commit();

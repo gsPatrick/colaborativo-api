@@ -4,6 +4,8 @@ const projectService = require('./project.service');
 exports.create = async (req, res) => {
   try {
     const ownerId = req.user.id;
+    // --- CORREÇÃO AQUI ---
+    // Inclui platformCommissionPercent, partnerId, commissionType, commissionValue
     const project = await projectService.createProject(req.body, ownerId);
     res.status(201).json(project);
   } catch (error) {

@@ -155,8 +155,7 @@ exports.findProjectById = async (projectId, userId) => {
         { model: Client }, 
         { model: db.Priority, attributes: ['id', 'name', 'color'] },
         { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { attributes: ['permissions'] } },
-        // --- INCLUI TRANSAÇÕES AQUI ---
+        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { attributes: ['commissionType', 'commissionValue', 'permissions'] } }, // Inclui dados da ProjectShare
         { model: Transaction, as: 'Transactions', order: [['paymentDate', 'DESC']] }
     ]
   });
@@ -174,18 +173,27 @@ exports.findProjectById = async (projectId, userId) => {
  */
 exports.updateProject = async (projectId, updateData, userId) => {
   const project = await this.findProjectById(projectId, userId);
-  const { tagIds, ...restOfData } = updateData;
+  const { tagIds, priorityId, ...restOfData } = updateData; // Extrai priorityId
+
   const shareInfo = await ProjectShare.findOne({ where: { projectId, partnerId: userId } });
   const isOwner = project.ownerId === userId;
   const canEdit = isOwner || (shareInfo && shareInfo.permissions === 'edit');
+
   if (!canEdit) {
     throw new Error("Acesso negado. Você não tem permissão para editar este projeto.");
   }
+
+  // --- CORREÇÃO AQUI ---
+  // Garante que priorityId seja nulo se for uma string vazia ou undefined
+  const finalPriorityId = priorityId === '' || priorityId === undefined ? null : parseInt(priorityId, 10);
+  
+  // Atualiza as tags, se enviadas
   if (tagIds) {
     const tags = await Tag.findAll({ where: { id: tagIds, userId: project.ownerId } });
     await project.setTags(tags);
   }
-  await project.update(restOfData);
+
+  await project.update({ ...restOfData, priorityId: finalPriorityId }); // Salva com o priorityId corrigido
   return this.findProjectById(projectId, userId);
 };
 
