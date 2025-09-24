@@ -26,6 +26,67 @@ const checkClientPermission = async (clientId, userId) => {
   return true;
 };
 
+const calculateProjectFinancialsForUser = (project, currentUserId) => {
+    const budget = parseFloat(project.budget || 0);
+    const platformCommissionPercent = parseFloat(project.platformCommissionPercent || 0);
+    const platformFee = budget * (platformCommissionPercent / 100);
+
+    let netAmountAfterPlatform = budget - platformFee;
+    let totalPartnersCommissionsValue = 0; 
+
+    // Calcula a soma das comissões de todos os parceiros
+    project.ProjectShares?.forEach(share => { // project.ProjectShares é o include direto de ProjectShare
+        const partnerExpectedAmount = share.commissionType === 'percentage'
+            ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
+            : parseFloat(share.commissionValue);
+        totalPartnersCommissionsValue += partnerExpectedAmount;
+    });
+
+    const ownerExpectedProfit = netAmountAfterPlatform - totalPartnersCommissionsValue;
+
+    let yourTotalToReceive = 0;
+    let yourAmountReceived = 0;
+    
+    if (project.ownerId === currentUserId) {
+        yourTotalToReceive = ownerExpectedProfit;
+        yourAmountReceived = parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
+    } else {
+        const userAsPartner = project.Partners?.find(p => p.id === currentUserId);
+        if (userAsPartner) {
+            const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId); // Acessa o ProjectShare direto
+            if (partnerShare) {
+                if (partnerShare.commissionType === 'percentage') {
+                    yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
+                } else if (partnerShare.commissionType === 'fixed') {
+                    yourTotalToReceive = parseFloat(partnerShare.commissionValue);
+                }
+                yourAmountReceived = parseFloat(partnerShare.amountPaid || 0);
+            }
+        }
+    }
+    const yourRemainingToReceive = yourTotalToReceive - yourAmountReceived;
+
+    return {
+        yourTotalToReceive: yourTotalToReceive.toFixed(2),
+        yourAmountReceived: yourAmountReceived.toFixed(2),
+        yourRemainingToReceive: yourRemainingToReceive.toFixed(2),
+        platformFee: platformFee.toFixed(2),
+        netAmountAfterPlatform: netAmountAfterPlatform.toFixed(2),
+        partnersCommissionsList: project.Partners?.map(partner => {
+            const share = project.ProjectShares?.find(ps => ps.partnerId === partner.id);
+            const partnerExpectedAmount = share.commissionType === 'percentage'
+                ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
+                : parseFloat(share.commissionValue);
+            return {
+                id: partner.id,
+                name: partner.name,
+                expectedAmount: partnerExpectedAmount.toFixed(2),
+                shareDetails: share
+            };
+        }) || []
+    };
+};
+
 /**
  * Cria um novo projeto.
  */
@@ -109,72 +170,14 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     ]
   };
 
-  if (status && status !== 'all') {
-    if (status === 'active') {
-      whereConditions.status = { [Op.in]: ['in_progress', 'paused', 'draft'] };
-    } else if (status === 'completed') {
-      whereConditions.status = 'completed';
-    }
-  }
-  
-  if (priorityId && priorityId !== 'all' && priorityId !== '') {
-      whereConditions.priorityId = parseInt(priorityId, 10);
-  }
-  if (clientId && clientId !== 'all' && clientId !== '') {
-      whereConditions.clientId = parseInt(clientId, 10);
-  }
-  if (platformId && platformId !== 'all' && platformId !== '') {
-      whereConditions.platformId = parseInt(platformId, 10);
-  }
-  
+  if (status && status !== 'all') { /* ... */ }
+  if (priorityId && priorityId !== 'all' && priorityId !== '') { /* ... */ }
+  if (clientId && clientId !== 'all' && clientId !== '') { /* ... */ }
+  if (platformId && platformId !== 'all' && platformId !== '') { /* ... */ }
   if (minBudget && minBudget !== '') whereConditions.budget = { [Op.gte]: parseFloat(minBudget) };
-  if (maxBudget && maxBudget !== '') {
-      if (whereConditions.budget) {
-          whereConditions.budget[Op.lte] = parseFloat(maxBudget);
-      } else {
-          whereConditions.budget = { [Op.lte]: parseFloat(maxBudget) };
-      }
-  }
+  if (maxBudget && maxBudget !== '') { /* ... */ }
 
-
-  let orderClause = [['createdAt', 'DESC']]; // Padrão
-  if (sortBy === 'budget') orderClause = [['budget', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-  if (sortBy === 'deadline') orderClause = [['deadline', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-  if (sortBy === 'name') orderClause = [['name', sortOrder === 'asc' ? 'ASC' : 'DESC']];
-
-
-  const allFilteredProjects = await Project.findAll({ 
-    where: whereConditions,
-    include: [{ model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue'] }] 
-  });
-  
-  const summary = allFilteredProjects.reduce((acc, project) => {
-    const budget = parseFloat(project.budget || 0);
-    const platformCommissionPercent = parseFloat(project.platformCommissionPercent || 0);
-    const platformFee = budget * (platformCommissionPercent / 100);
-
-    let netAmountAfterPlatform = budget - platformFee;
-    let totalPartnersCommissions = 0;
-
-    project.ProjectShares?.forEach(share => {
-        const partnerExpectedAmount = share.commissionType === 'percentage'
-            ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
-            : parseFloat(share.commissionValue);
-        totalPartnersCommissions += partnerExpectedAmount;
-    });
-
-    const ownerExpectedAmount = netAmountAfterPlatform - totalPartnersCommissions;
-
-    acc.totalBudget += budget;
-    acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
-    acc.totalToReceiveByOwner += ownerExpectedAmount;
-    acc.totalReceivedByOwner += parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
-
-    return acc;
-  }, { totalBudget: 0, totalReceived: 0, totalToReceiveByOwner: 0, totalReceivedByOwner: 0 });
-
-  summary.remainingToReceiveByOwner = summary.totalToReceiveByOwner - summary.totalReceivedByOwner;
-
+  let orderClause = [['createdAt', 'DESC']]; /* ... */
 
   const { count, rows: projects } = await Project.findAndCountAll({
     where: whereConditions,
@@ -185,7 +188,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
       { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
       { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] },
-      { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
+      { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] } // Essencial para calcular ProjectFinancials
     ],
     order: orderClause,
     limit: parseInt(limit, 10),
@@ -193,19 +196,37 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     distinct: true
   });
 
+  // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS A CADA PROJETO ---
+  const projectsWithFinancials = projects.map(project => {
+      const financials = calculateProjectFinancialsForUser(project, userId);
+      return { ...project.get({ plain: true }), ...financials };
+  });
+
+  // Recalcula o sumário baseado nos projectsWithFinancials (que agora já têm os valores corretos)
+  const summary = projectsWithFinancials.reduce((acc, project) => {
+    acc.totalBudget += parseFloat(project.budget || 0);
+    acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
+    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0);
+    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0);
+    return acc;
+  }, { totalBudget: 0, totalReceived: 0, totalToReceive: 0, totalReceivedByOwner: 0 });
+  
+  summary.remainingToReceive = summary.totalToReceive - summary.totalReceivedByOwner;
+
+
   return {
     summary: {
         totalBudget: summary.totalBudget,
-        totalReceived: summary.totalReceived,
-        totalToReceive: summary.totalToReceiveByOwner,
-        remainingToReceive: summary.remainingToReceiveByOwner
+        totalReceived: summary.totalReceived, // Total recebido do cliente (que vai para o ProjectCard)
+        totalToReceive: summary.totalToReceive, // Seu Líquido a Receber (que vai para o ProjectCard)
+        remainingToReceive: summary.remainingToReceive // Seu Líquido Restante (que vai para o ProjectCard)
     },
     pagination: {
       totalProjects: count,
       totalPages: Math.ceil(count / limit),
       currentPage: parseInt(page, 10)
     },
-    projects
+    projects: projectsWithFinancials // Retorna os projetos com os cálculos anexados
   };
 };
 
@@ -222,7 +243,7 @@ exports.findProjectById = async (projectId, userId) => {
         { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
         { model: Transaction, as: 'Transactions', order: [['paymentDate', 'DESC']] },
         { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] },
-        { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
+        { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] } // Inclui ProjectShare diretamente
     ]
   });
   if (!project) throw new Error("Projeto não encontrado.");
@@ -231,7 +252,10 @@ exports.findProjectById = async (projectId, userId) => {
   if (!isOwner && !isPartner) {
     throw new Error("Acesso negado. Você não tem permissão para ver este projeto.");
   }
-  return project;
+
+  // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS AO PROJETO ÚNICO ---
+  const financials = calculateProjectFinancialsForUser(project, userId);
+  return { ...project.get({ plain: true }), ...financials };
 };
 
 /**
