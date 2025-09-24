@@ -30,6 +30,15 @@ module.exports = (sequelize, DataTypes) => {
     permissions: {
       type: DataTypes.ENUM('read', 'edit'),
       defaultValue: 'read'
+    },
+    // --- NOVOS CAMPOS PARA STATUS DE PAGAMENTO DO PARCEIRO ---
+    paymentStatus: {
+      type: DataTypes.ENUM('unpaid', 'partial', 'paid'),
+      defaultValue: 'unpaid'
+    },
+    amountPaid: { // O quanto já foi repassado ao parceiro
+      type: DataTypes.DECIMAL(10, 2),
+      defaultValue: 0.00
     }
   }, {
     sequelize,

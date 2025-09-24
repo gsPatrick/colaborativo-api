@@ -12,6 +12,8 @@ const dashboardRoutes = require('../features/dashboard/dashboard.routes');
 const invoiceRoutes = require('../features/invoice/invoice.routes');
 const expenseRoutes = require('../features/expenses/expense.routes');
 const transactionRoutes = require ('../features/transaction/transaction.routes')
+const platformRoutes = require('../features/platform/platform.routes'); // <-- NOVO
+
 // --- CORREÇÃO AQUI ---
 // Garante que o caminho para os novos arquivos de rota esteja correto
 const timeEntryRoutes = require('../features/time-entries/timeEntry.routes'); 
@@ -40,6 +42,7 @@ router.use('/', expenseRoutes);
 router.use('/', timeEntryRoutes);
 
 router.use('/', transactionRoutes); // <-- NOVO (use '/' pois as rotas já são específicas)
+router.use('/', platformRoutes); // <-- NOVO
 
 
 module.exports = router;

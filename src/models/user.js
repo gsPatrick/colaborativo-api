@@ -34,6 +34,7 @@ module.exports = (sequelize, DataTypes) => {
       // Novas associações de produtividade
       this.hasMany(models.TimeEntry, { foreignKey: 'userId' });
       this.hasMany(models.Expense, { foreignKey: 'userId' });
+      this.hasMany(models.Platform, { foreignKey: 'userId' });
     }
   }
   User.init({

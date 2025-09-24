@@ -65,7 +65,7 @@ const seedDatabase = async () => {
 
 // Sincronizar banco de dados e iniciar servidor
 // Use `force: true` APENAS em desenvolvimento para recriar as tabelas
-sequelize.sync({ force: false }) 
+sequelize.sync({ force: true }) 
   .then(() => {
     console.log('Banco de dados sincronizado com sucesso!');
     

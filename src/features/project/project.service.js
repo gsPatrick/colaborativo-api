@@ -7,7 +7,8 @@ const User = db.User;
 const Tag = db.Tag;
 const ProjectShare = db.ProjectShare;
 const Collaboration = db.Collaboration;
-const Transaction = db.Transaction; // Importa o modelo de Transação
+const Transaction = db.Transaction;
+const Platform = db.Platform; // Importar Platform
 
 // Função auxiliar para verificar permissão de acesso a um cliente
 const checkClientPermission = async (clientId, userId) => {
@@ -29,48 +30,57 @@ const checkClientPermission = async (clientId, userId) => {
 exports.createProject = async (projectData, ownerId) => {
   const { 
       name, clientId, isNewClient, newClientName, tagIds, 
-      partnerId, commissionType, commissionValue, 
+      partnerId, commissionType, commissionValue, // Comissão do PARCEIRO
+      platformId, platformCommissionPercent, // Comissão da PLATAFORMA
+      ownerCommissionType, ownerCommissionValue, // Comissão do DONO
       ...restOfData 
   } = projectData;
 
   let finalClientId;
-
   if (isNewClient && newClientName) {
-    if (newClientName.trim() === '') {
-        throw new Error("O nome do novo cliente não pode ser vazio.");
-    }
-    const newClient = await Client.create({
-      legalName: newClientName, // Usa o campo correto
-      ownerId: ownerId,
-    });
+    if (newClientName.trim() === '') throw new Error("O nome do novo cliente não pode ser vazio.");
+    const newClient = await Client.create({ legalName: newClientName, ownerId: ownerId });
     finalClientId = newClient.id;
   } else {
-    if (!clientId) {
-      throw new Error("Cliente é obrigatório.");
-    }
+    if (!clientId) throw new Error("Cliente é obrigatório.");
     await checkClientPermission(clientId, ownerId);
     finalClientId = clientId;
   }
 
-  if (!name) {
-    throw new Error("Nome do projeto é obrigatório.");
-  }
+  if (!name) throw new Error("Nome do projeto é obrigatório.");
 
   const project = await Project.create({
     ...restOfData,
     name,
     clientId: finalClientId,
     ownerId,
+    platformId: platformId || null,
+    platformCommissionPercent: platformCommissionPercent || 0,
+    ownerCommissionType: ownerCommissionType || null,
+    ownerCommissionValue: ownerCommissionValue || 0,
+    paymentDetails: {
+        client: { status: 'unpaid', amountPaid: 0 },
+        owner: { status: 'unpaid', amountReceived: 0 },
+        partners: {}
+    }
   });
 
+  // Associa parceiro (se houver) e atualiza ProjectShare
   if (partnerId && commissionType && commissionValue != null) {
       const partner = await User.findByPk(partnerId);
       if (!partner) throw new Error("Parceiro de colaboração não encontrado.");
       await project.addPartner(partner, {
-          through: { commissionType, commissionValue, permissions: 'edit' }
+          through: { 
+            commissionType, 
+            commissionValue, 
+            permissions: 'edit',
+            paymentStatus: 'unpaid', // Valor padrão
+            amountPaid: 0.00 // Valor padrão
+          } 
       });
   }
 
+  // Associa tags (se houver)
   if (tagIds && tagIds.length > 0) {
     const tags = await Tag.findAll({ where: { id: tagIds, userId: ownerId } });
     await project.setTags(tags);
@@ -101,7 +111,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
 
   if (status) {
     if (status === 'active') {
-      whereConditions.status = { [Op.in]: ['in_progress', 'paused'] };
+      whereConditions.status = { [Op.in]: ['in_progress', 'paused', 'draft'] };
     } else if (status === 'completed') {
       whereConditions.status = 'completed';
     }
@@ -113,7 +123,8 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   
   const summary = allFilteredProjects.reduce((acc, project) => {
     acc.totalBudget += parseFloat(project.budget || 0);
-    acc.totalReceived += parseFloat(project.paymentDetails.clientAmountPaid || 0);
+    // Sumário de recebidos baseado apenas no cliente para consistência
+    acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
     return acc;
   }, { totalBudget: 0, totalReceived: 0 });
   summary.totalToReceive = summary.totalBudget - summary.totalReceived;
@@ -122,11 +133,11 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     where: whereConditions,
     include: [
       { model: User, as: 'Owner', attributes: ['id', 'name'] },
-      // --- CORREÇÃO AQUI ---
       { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
       { model: db.Priority, attributes: ['id', 'name', 'color'] },
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-      { model: User, as: 'Partners', attributes: ['id', 'name'], through: { attributes: ['permissions'] } }
+      { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
+      { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] } // Inclui a plataforma
     ],
     order: [['createdAt', 'DESC']],
     limit: parseInt(limit, 10),
@@ -155,13 +166,15 @@ exports.findProjectById = async (projectId, userId) => {
         { model: Client }, 
         { model: db.Priority, attributes: ['id', 'name', 'color'] },
         { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { attributes: ['commissionType', 'commissionValue', 'permissions'] } }, // Inclui dados da ProjectShare
-        { model: Transaction, as: 'Transactions', order: [['paymentDate', 'DESC']] }
+        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
+        { model: Transaction, as: 'Transactions', order: [['paymentDate', 'DESC']] },
+        { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl'] }, // Inclui a plataforma
+        { model: db.ProjectShare, as: 'ProjectShares' } // Necessário para validação de acesso
     ]
   });
   if (!project) throw new Error("Projeto não encontrado.");
   const isOwner = project.ownerId === userId;
-  const isPartner = project.Partners.some(p => p.id === userId);
+  const isPartner = project.Partners.some(p => p.id === userId); // Verifica se está na lista de Partners
   if (!isOwner && !isPartner) {
     throw new Error("Acesso negado. Você não tem permissão para ver este projeto.");
   }
@@ -173,27 +186,59 @@ exports.findProjectById = async (projectId, userId) => {
  */
 exports.updateProject = async (projectId, updateData, userId) => {
   const project = await this.findProjectById(projectId, userId);
-  const { tagIds, priorityId, ...restOfData } = updateData; // Extrai priorityId
+  const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData; // Extrai dados de parceria para tratar separado
 
+  // Validação de acesso para edição
   const shareInfo = await ProjectShare.findOne({ where: { projectId, partnerId: userId } });
   const isOwner = project.ownerId === userId;
   const canEdit = isOwner || (shareInfo && shareInfo.permissions === 'edit');
-
   if (!canEdit) {
     throw new Error("Acesso negado. Você não tem permissão para editar este projeto.");
   }
 
-  // --- CORREÇÃO AQUI ---
   // Garante que priorityId seja nulo se for uma string vazia ou undefined
   const finalPriorityId = priorityId === '' || priorityId === undefined ? null : parseInt(priorityId, 10);
   
-  // Atualiza as tags, se enviadas
+  // Atualiza as tags
   if (tagIds) {
     const tags = await Tag.findAll({ where: { id: tagIds, userId: project.ownerId } });
     await project.setTags(tags);
   }
 
-  await project.update({ ...restOfData, priorityId: finalPriorityId }); // Salva com o priorityId corrigido
+  // --- Lógica para atualizar a comissão de parceria (se mudou no formulário de edição) ---
+  if (partnerId) { // Se um partnerId foi enviado, tenta atualizar ou adicionar
+      const partnerShareEntry = await ProjectShare.findOne({ where: { projectId: project.id, partnerId: partnerId } });
+      if (partnerShareEntry) {
+          // Atualiza dados da ProjectShare existente
+          await partnerShareEntry.update({ 
+              commissionType: commissionType || partnerShareEntry.commissionType, 
+              commissionValue: parseFloat(commissionValue) || partnerShareEntry.commissionValue 
+          });
+      } else {
+          // Se o parceiro foi adicionado, cria a entrada de compartilhamento
+          const partner = await User.findByPk(partnerId);
+          if (!partner) throw new Error("Parceiro de colaboração não encontrado.");
+          await project.addPartner(partner, {
+              through: { 
+                commissionType: commissionType || 'percentage', // Padrão se não informado
+                commissionValue: parseFloat(commissionValue) || 0.00,
+                permissions: 'edit',
+                paymentStatus: 'unpaid',
+                amountPaid: 0.00
+              } 
+          });
+      }
+  } else if (!partnerId && project.Partners && project.Partners.length > 0) {
+      // Se o partnerId foi removido (e havia parceiros antes), remove todas as associações de parceiros.
+      // Em um sistema real, o front-end deveria enviar qual parceiro remover especificamente.
+      // Aqui, para simplicidade, se o partnerId do formData estiver vazio, removemos todos os parceiros existentes.
+      for (const p of project.Partners) {
+          await project.removePartner(p.id);
+      }
+  }
+
+
+  await project.update({ ...restOfData, priorityId: finalPriorityId });
   return this.findProjectById(projectId, userId);
 };
 
