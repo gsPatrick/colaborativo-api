@@ -13,6 +13,7 @@ const invoiceRoutes = require('../features/invoice/invoice.routes');
 const expenseRoutes = require('../features/expenses/expense.routes');
 const transactionRoutes = require ('../features/transaction/transaction.routes')
 const platformRoutes = require('../features/platform/platform.routes'); // <-- NOVO
+const recurrenceRoutes = require('../features/recurrences/recurrence.routes'); // <-- NOVO: Rotas de recorrência/forecast
 
 // --- CORREÇÃO AQUI ---
 // Garante que o caminho para os novos arquivos de rota esteja correto
@@ -43,6 +44,7 @@ router.use('/', timeEntryRoutes);
 
 router.use('/', transactionRoutes); // <-- NOVO (use '/' pois as rotas já são específicas)
 router.use('/', platformRoutes); // <-- NOVO
+router.use('/', recurrenceRoutes); // <-- NOVO
 
 
 module.exports = router;
