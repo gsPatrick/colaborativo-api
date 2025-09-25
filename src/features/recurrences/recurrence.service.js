@@ -119,18 +119,63 @@ exports.deleteRecurrence = async (id, userId) => {
 
 // --- Lançamentos Previstos (Forecast Entries) ---
 exports.findAllForecastEntries = async (userId, filters) => {
-    const whereClause = { userId };
-    if (filters.type) whereClause.type = filters.type;
-    if (filters.status) whereClause.status = filters.status;
-    if (filters.clientId) whereClause.clientId = filters.clientId;
-    if (filters.projectId) whereClause.projectId = filters.projectId;
+    const { type, status, clientId, projectId, datePeriod = 'all', startDate, endDate } = filters;
+    const now = new Date();
+    let effectiveStartDate = startDate ? startOfDay(new Date(startDate)) : null;
+    let effectiveEndDate = endDate ? endOfDay(new Date(endDate)) : null;
 
-    return ForecastEntry.findAll({
+    // Lógica de filtro por período (ex: 'month', 'nextMonth')
+    if (datePeriod === 'month') {
+        effectiveStartDate = startOfMonth(now);
+        effectiveEndDate = endOfMonth(now);
+    } else if (datePeriod === 'nextMonth') {
+        effectiveStartDate = startOfMonth(addMonths(now, 1));
+        effectiveEndDate = endOfMonth(addMonths(now, 1));
+    }
+    // Adicione mais períodos conforme necessário ('next3Months', 'next6Months', etc.)
+
+    const whereClause = { userId };
+    if (type) whereClause.type = type;
+    if (status) whereClause.status = status;
+    if (clientId) whereClause.clientId = clientId;
+    if (projectId) whereClause.projectId = projectId;
+
+    if (effectiveStartDate && effectiveEndDate) {
+        whereClause.dueDate = { [Op.between]: [effectiveStartDate, effectiveEndDate] };
+    } else if (effectiveStartDate) {
+        whereClause.dueDate = { [Op.gte]: effectiveStartDate };
+    } else if (effectiveEndDate) {
+        whereClause.dueDate = { [Op.lte]: effectiveEndDate };
+    }
+    // Por padrão, sempre mostra a partir de hoje se nenhum filtro de data explícito
+    if (!effectiveStartDate && !effectiveEndDate && datePeriod === 'all') {
+         whereClause.dueDate = { [Op.gte]: startOfDay(now) };
+    }
+
+
+    const entries = await ForecastEntry.findAll({
         where: whereClause,
         include: [{ model: Recurrence }, { model: Client }, { model: Project }],
         order: [['dueDate', 'ASC']]
     });
+
+    // Calcula o sumário financeiro dos lançamentos previstos
+    const summary = entries.reduce((acc, entry) => {
+        const amount = parseFloat(entry.amount);
+        acc.totalBruto += amount;
+        if (entry.type === 'revenue') {
+            acc.totalRevenue += amount;
+        } else {
+            acc.totalExpense += amount;
+        }
+        return acc;
+    }, { totalBruto: 0, totalRevenue: 0, totalExpense: 0 });
+
+    summary.totalLiquido = summary.totalRevenue - summary.totalExpense;
+
+    return { entries, summary };
 };
+
 
 exports.confirmForecastEntry = async (forecastEntryId, userId) => {
     const t = await db.sequelize.transaction();
