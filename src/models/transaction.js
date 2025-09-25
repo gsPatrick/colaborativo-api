@@ -28,6 +28,11 @@ module.exports = (sequelize, DataTypes) => {
     description: {
       type: DataTypes.STRING,
       allowNull: true
+    },
+        forecastEntryId: { // Liga a transação a um lançamento previsto
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: 'forecast_entries', key: 'id' }
     }
   }, {
     sequelize,

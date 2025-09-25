@@ -20,6 +20,12 @@ module.exports = (sequelize, DataTypes) => {
     amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     expenseDate: { type: DataTypes.DATEONLY, allowNull: false },
     receiptUrl: DataTypes.STRING, // Link da imagem do comprovante
+        // --- NOVO CAMPO ---
+    forecastEntryId: { // Liga a despesa a um lançamento previsto
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: 'forecast_entries', key: 'id' }
+    }
   }, {
     sequelize,
     modelName: 'Expense', // Este nome DEVE corresponder ao que é usado nas associações (models.Expense)

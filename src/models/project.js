@@ -47,6 +47,8 @@ module.exports = (sequelize, DataTypes) => {
       // Associações de produtividade
       this.hasMany(models.TimeEntry, { foreignKey: 'projectId', as: 'TimeEntries' });
       this.hasMany(models.Expense, { foreignKey: 'projectId', as: 'Expenses' });
+        this.hasMany(models.Recurrence, { foreignKey: 'projectId' }); // Uma recorrência pode ser ligada a um projeto
+  this.hasMany(models.ForecastEntry, { foreignKey: 'projectId' });
 
       // Associação com a plataforma (ex: Workana, 99Freelas)
       this.belongsTo(models.Platform, { foreignKey: 'platformId', as: 'AssociatedPlatform' });

@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs'); // Importar bcrypt para a senha
 require('dotenv').config();
+const recurrenceService = require('./src/features/recurrences/recurrence.service'); // Importar serviço de recorrência
 
 const mainRouter = require('./src/routes');
 const db = require('./src/models');
@@ -66,11 +67,13 @@ const seedDatabase = async () => {
 // Sincronizar banco de dados e iniciar servidor
 // Use `force: true` APENAS em desenvolvimento para recriar as tabelas
 sequelize.sync({ force: false }) 
-  .then(() => {
+  .then(async () => { // Usar async aqui
     console.log('Banco de dados sincronizado com sucesso!');
     
-    // Roda a função de seeding DEPOIS de sincronizar
-    seedDatabase();
+    await seedDatabase(); // Aguarda o seeding do usuário/prioridades
+
+    // --- NOVA CHAMADA: Gerar lançamentos previstos iniciais ---
+    await recurrenceService.generateInitialForecasts();
 
     app.listen(PORT, () => {
       console.log(`Servidor rodando na porta ${PORT}`);

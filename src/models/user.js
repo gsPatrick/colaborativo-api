@@ -35,6 +35,8 @@ module.exports = (sequelize, DataTypes) => {
       this.hasMany(models.TimeEntry, { foreignKey: 'userId' });
       this.hasMany(models.Expense, { foreignKey: 'userId' });
       this.hasMany(models.Platform, { foreignKey: 'userId' });
+      this.hasMany(models.Recurrence, { foreignKey: 'userId' });
+      this.hasMany(models.ForecastEntry, { foreignKey: 'userId' });
     }
   }
   User.init({
