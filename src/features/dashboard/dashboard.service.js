@@ -9,6 +9,7 @@ const ProjectShare = db.ProjectShare;
 const Expense = db.Expense;
 const Platform = db.Platform;
 const ForecastEntry = db.ForecastEntry; // Importar ForecastEntry
+const User = db.User; // <-- CORREÇÃO AQUI: Importar o modelo User
 
 
 /**
