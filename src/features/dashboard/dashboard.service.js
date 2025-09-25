@@ -1,6 +1,6 @@
 const db = require('../../models');
 const { Op, Sequelize } = require('sequelize');
-const { startOfMonth, endOfMonth, subMonths, startOfDay } = require('date-fns');
+const { startOfMonth, endOfMonth, subMonths } = require('date-fns');
 
 const Project = db.Project;
 const Client = db.Client;
@@ -9,8 +9,6 @@ const ProjectShare = db.ProjectShare;
 const Expense = db.Expense;
 const Platform = db.Platform;
 const ForecastEntry = db.ForecastEntry; // Importar ForecastEntry
-const User = db.User; // <-- CORREÇÃO AQUI: Importar o modelo User
-
 
 /**
  * Função auxiliar que calcula o valor recebido em um determinado período.
@@ -22,8 +20,8 @@ async function calculateReceivedInPeriod(userId, startDate, endDate) {
         ],
         include: [{
             model: Project,
-            attributes: [],
-            where: { ownerId: userId } // Filtra por projetos do dono
+            attributes: [], // Não precisa dos dados do projeto, apenas para o join
+            where: { ownerId: userId } // Garante que estamos somando apenas de projetos do usuário
         }],
         where: {
             paymentDate: {
@@ -55,76 +53,27 @@ async function calculateExpensesInPeriod(userId, startDate, endDate) {
 }
 
 /**
- * Função auxiliar para calcular os valores financeiros para um projeto específico
- * COM BASE NO USUÁRIO LOGADO (dono ou parceiro).
- * Esta função deve ser idêntica à do project.service.js para consistência.
+ * Calcula as receitas/despesas previstas em um período.
  */
-const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
-    const project = projectInstance.get({ plain: true });
-
-    const budget = parseFloat(project.budget || 0);
-    const platformCommissionPercent = parseFloat(project.platformCommissionPercent || 0);
-    const platformFee = budget * (platformCommissionPercent / 100);
-
-    let netAmountAfterPlatform = budget - platformFee;
-    let totalPartnersCommissionsValue = 0; 
-
-    project.ProjectShares?.forEach(share => {
-        const partnerExpectedAmount = share.commissionType === 'percentage'
-            ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
-            : parseFloat(share.commissionValue);
-        totalPartnersCommissionsValue += partnerExpectedAmount;
-    });
-
-    const ownerExpectedProfit = netAmountAfterPlatform - totalPartnersCommissionsValue;
-
-    let yourTotalToReceive = 0;
-    let yourAmountReceived = 0;
-    
-    if (project.ownerId === currentUserId) {
-        yourTotalToReceive = ownerExpectedProfit;
-        yourAmountReceived = parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
-    } else {
-        const userAsPartner = project.Partners?.find(p => p.id === currentUserId);
-        if (userAsPartner) {
-            const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId);
-            if (partnerShare) {
-                if (partnerShare.commissionType === 'percentage') {
-                    yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
-                } else if (partnerShare.commissionType === 'fixed') {
-                    yourTotalToReceive = parseFloat(partnerShare.commissionValue);
-                }
-                yourAmountReceived = parseFloat(partnerShare.amountPaid || 0);
+async function calculateForecastsInPeriod(userId, startDate, endDate, type) {
+    const result = await ForecastEntry.findOne({
+        attributes: [
+            [Sequelize.fn('SUM', Sequelize.col('amount')), 'totalAmount']
+        ],
+        where: {
+            userId: userId,
+            type: type,
+            status: 'pending', // Apenas os pendentes
+            dueDate: {
+                [Op.between]: [startDate, endDate]
             }
-        }
-    }
-    const yourRemainingToReceive = yourTotalToReceive - yourAmountReceived;
-
-    return {
-        yourTotalToReceive: yourTotalToReceive,
-        yourAmountReceived: yourAmountReceived,
-        yourRemainingToReceive: yourRemainingToReceive,
-        platformFee: platformFee,
-        netAmountAfterPlatform: netAmountAfterPlatform,
-        partnersCommissionsList: project.Partners?.map(partner => {
-            const share = project.ProjectShares?.find(ps => ps.partnerId === partner.id);
-            const partnerExpectedAmount = share.commissionType === 'percentage'
-                ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
-                : parseFloat(share.commissionValue);
-            return {
-                id: partner.id,
-                name: partner.name,
-                expectedAmount: partnerExpectedAmount,
-                shareDetails: share
-            };
-        }) || []
-    };
-};
+        },
+        raw: true
+    });
+    return parseFloat(result.totalAmount) || 0;
+}
 
 
-/**
- * Calcula os dados consolidados do dashboard para o usuário.
- */
 exports.getDashboardData = async (userId) => {
     // --- PASSO 1: OBTER IDs DE PROJETOS RELEVANTES ---
     const sharedProjectShares = await ProjectShare.findAll({
@@ -140,47 +89,58 @@ exports.getDashboardData = async (userId) => {
         ]
     };
 
-    // --- 2. CÁLCULO FINANCEIRO (Total Bruto, Seu Líquido Total, Seu Líquido Restante) ---
-    const allProjectsInstances = await Project.findAll({
+    // --- 2. CÁLCULO FINANCEIRO (Total e Falta a Receber) ---
+    // Incluímos ProjectShare aqui para os cálculos robustos
+    const allProjects = await Project.findAll({ 
         where: mainWhereClause,
-        include: [
-            { model: User, as: 'Partners', through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] } },
-            { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
-        ]
-    });
-
-    let totalGrossBudget = 0;
-    let totalYourExpectedToReceive = 0; // Sumário do seu líquido total esperado
-    let totalYourAmountReceived = 0;    // Sumário do seu líquido já recebido
-
-    // Calcula os financials para CADA projeto e soma nos totais do dashboard
-    const projectsWithFinancials = allProjectsInstances.map(project => {
-        const financials = calculateProjectFinancialsForUser(project, userId);
-        totalGrossBudget += parseFloat(project.budget || 0);
-        totalYourExpectedToReceive += parseFloat(financials.yourTotalToReceive);
-        totalYourAmountReceived += parseFloat(financials.yourAmountReceived);
-        return { ...project.get({ plain: true }), ...financials };
+        include: [{ model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'partnerId', 'amountPaid'] }]
     });
     
-    const remainingToReceive = totalYourExpectedToReceive - totalYourAmountReceived;
+    let totalGrossBudget = 0;
+    let totalReceivedByOwner = 0;
+    let totalExpectedByOwner = 0;
+
+    for (const project of allProjects) {
+        const budget = parseFloat(project.budget || 0);
+        const platformCommissionPercent = parseFloat(project.platformCommissionPercent || 0);
+        const platformFee = budget * (platformCommissionPercent / 100);
+
+        totalGrossBudget += budget;
+
+        let ownerNetAfterPlatform = budget - platformFee;
+        let partnersTotalCommissions = 0;
+
+        // Soma as comissões de todos os parceiros para o cálculo do dono
+        if (project.ProjectShares && project.ProjectShares.length > 0) {
+            for (const share of project.ProjectShares) {
+                const partnerExpectedAmount = share.commissionType === 'percentage'
+                    ? ownerNetAfterPlatform * (parseFloat(share.commissionValue) / 100)
+                    : parseFloat(share.commissionValue);
+                partnersTotalCommissions += partnerExpectedAmount;
+            }
+        }
+        
+        // Lucro líquido esperado para o dono (total do projeto - plataforma - comissões dos parceiros)
+        const currentProjectOwnerExpectedProfit = ownerNetAfterPlatform - partnersTotalCommissions;
+
+        totalExpectedByOwner += currentProjectOwnerExpectedProfit;
+        totalReceivedByOwner += parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
+    }
+
+    const remainingToReceive = totalExpectedByOwner - totalReceivedByOwner;
 
 
-    // --- 3. LUCRO LÍQUIDO DO MÊS ATUAL (Receitas - Despesas) ---
+    // --- 3. LUCRO LÍQUIDO DO MÊS ATUAL ---
     const now = new Date();
     const currentMonthStart = startOfMonth(now);
-    const currentMonthEnd = endOfMonth(now); // Fim do mês para calcular previstos
+    const currentMonthEnd = endOfMonth(now);
     
-    const netReceivedInMonth = await calculateReceivedInPeriod(userId, currentMonthStart, now);
-    const totalExpensesMonth = await calculateExpensesInPeriod(userId, currentMonthStart, now);
+    const netReceivedInMonth = await calculateReceivedInPeriod(userId, currentMonthStart, currentMonthEnd); // Usa endOfMonth
+    const totalExpensesMonth = await calculateExpensesInPeriod(userId, currentMonthStart, currentMonthEnd); // Usa endOfMonth
     const netProfitAfterExpenses = netReceivedInMonth - totalExpensesMonth;
 
 
-    // --- 4. LANÇAMENTOS PREVISTOS (RECEITAS/DESPESAS) PARA O MÊS ATUAL ---
-    const forecastRevenueMonth = await calculateForecastsInPeriod(userId, currentMonthStart, currentMonthEnd, 'revenue');
-    const forecastExpenseMonth = await calculateForecastsInPeriod(userId, currentMonthStart, currentMonthEnd, 'expense');
-
-
-    // --- 5. LISTA DE PROJETOS ATIVOS ---
+    // --- 4. LISTA DE PROJETOS ATIVOS ---
     const activeProjectsList = await Project.findAll({
         where: {
             ...mainWhereClause,
@@ -191,21 +151,21 @@ exports.getDashboardData = async (userId) => {
         attributes: ['id', 'name']
     });
 
-    // --- 6. PRÓXIMOS PRAZOS ---
+    // --- 5. PRÓXIMOS PRAZOS ---
     const sevenDaysFromNow = new Date();
     sevenDaysFromNow.setDate(now.getDate() + 7);
     const upcomingDeadlines = await Project.findAll({
         where: {
-            ownerId: userId, // Apenas prazos de projetos que o usuário é dono
+            ownerId: userId, // Apenas projetos próprios para prazos
             status: { [Op.in]: ['in_progress', 'paused'] },
-            deadline: { [Op.between]: [startOfDay(now), sevenDaysFromNow] } // A partir do início de hoje
+            deadline: { [Op.between]: [now, sevenDaysFromNow] }
         },
         order: [['deadline', 'ASC']],
         limit: 5,
         attributes: ['id', 'name', 'deadline']
     });
 
-    // --- 7. PROJETOS CONCLUÍDOS RECENTEMENTE ---
+    // --- 6. PROJETOS CONCLUÍDOS RECENTEMENTE ---
     const recentCompletedProjectsData = await Project.findAll({
         where: {
             ...mainWhereClause,
@@ -257,7 +217,7 @@ exports.getDashboardData = async (userId) => {
     });
 
 
-    // --- 8. DADOS PARA O GRÁFICO (Lucro Mensal = Recebimento - Despesas) ---
+    // --- 7. DADOS PARA O GRÁFICO ---
     const profitChartData = [];
     for (let i = 5; i >= 0; i--) {
         const date = subMonths(now, i);
@@ -266,7 +226,7 @@ exports.getDashboardData = async (userId) => {
         const monthName = monthStart.toLocaleString('pt-BR', { month: 'short' }).replace('.', '');
         
         const totalReceivedInMonth = await calculateReceivedInPeriod(userId, monthStart, monthEnd);
-        const totalExpensesInMonth = await calculateExpensesInPeriod(userId, monthStart, monthEnd); // Despesas do mês específico
+        const totalExpensesInMonth = await calculateExpensesInPeriod(userId, monthStart, monthEnd);
         
         profitChartData.push({ name: monthName, lucro: totalReceivedInMonth - totalExpensesInMonth });
     }
@@ -274,14 +234,14 @@ exports.getDashboardData = async (userId) => {
     return {
         netProfitMonth: netProfitAfterExpenses,
         totalGrossBudget: totalGrossBudget,
-        totalToReceive: totalYourExpectedToReceive, // Seu líquido total a receber
-        remainingToReceive: remainingToReceive,     // Seu líquido que ainda não entrou
+        totalToReceive: totalExpectedByOwner,
+        remainingToReceive: remainingToReceive,
         activeProjects: activeProjectsList,
         upcomingDeadlines,
         recentCompletedProjects,
         profitChartData,
         totalExpensesMonth: totalExpensesMonth,
-        forecastRevenueMonth: forecastRevenueMonth, // Previsão de receita do mês atual
-        forecastExpenseMonth: forecastExpenseMonth  // Previsão de despesa do mês atual
+        forecastRevenueMonth: 0, // Temporariamente 0, será preenchido se o frontend precisar
+        forecastExpenseMonth: 0  // Temporariamente 0, será preenchido se o frontend precisar
     };
 };
