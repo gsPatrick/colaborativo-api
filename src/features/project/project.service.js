@@ -356,7 +356,8 @@ exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = 
             include: [
                 { model: ProjectShare, as: 'ProjectShares' },
                 { model: User, as: 'Partners', through: { model: ProjectShare, as: 'ProjectShare' } }
-            ] 
+            ],
+            transaction: t // Garante que a leitura seja feita dentro da transação
         });
         if (!project) throw new Error("Projeto não encontrado.");
 
@@ -367,44 +368,57 @@ exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = 
             throw new Error("Acesso negado. Você não é o dono nem um parceiro deste projeto.");
         }
 
-        let updatedPaymentDetails = { ...project.paymentDetails };
+        // --- CORREÇÃO CRÍTICA AQUI ---
+        // Cria uma cópia profunda (deep copy) do objeto paymentDetails.
+        // Isso quebra a referência ao objeto original e garante que o Sequelize
+        // detecte a alteração no campo JSONB.
+        let updatedPaymentDetails = JSON.parse(JSON.stringify(project.paymentDetails));
 
+        // --- LÓGICA DE ATUALIZAÇÃO DO RECEBIMENTO DO USUÁRIO ---
         if (isOwner) {
             const financials = calculateProjectFinancialsForUser(project, userId);
             const currentReceived = parseFloat(updatedPaymentDetails.owner.amountReceived || 0);
             const totalToReceive = parseFloat(financials.yourTotalToReceive);
             
             let newAmountReceived = currentReceived + parseFloat(amount || 0);
-            if (isFullPayment) newAmountReceived = totalToReceive;
+            if (isFullPayment) {
+                newAmountReceived = totalToReceive;
+            }
 
             updatedPaymentDetails.owner.amountReceived = newAmountReceived.toFixed(2);
             updatedPaymentDetails.owner.status = newAmountReceived >= totalToReceive ? 'paid' : 'partial';
 
-        } else if (partnerShareEntry) {
+        } else if (partnerShareEntry) { // É um parceiro
             const financials = calculateProjectFinancialsForUser(project, userId);
             const currentReceived = parseFloat(partnerShareEntry.amountPaid || 0);
             const totalToReceive = parseFloat(financials.yourTotalToReceive);
 
             let newAmountReceived = currentReceived + parseFloat(amount || 0);
-            if (isFullPayment) newAmountReceived = totalToReceive;
+            if (isFullPayment) {
+                newAmountReceived = totalToReceive;
+            }
 
             await partnerShareEntry.update({
                 amountPaid: newAmountReceived.toFixed(2),
                 paymentStatus: newAmountReceived >= totalToReceive ? 'paid' : 'partial'
             }, { transaction: t });
 
-            updatedPaymentDetails.partners = {
-                ...updatedPaymentDetails.partners,
-                [userId]: { 
-                    status: newAmountReceived >= totalToReceive ? 'paid' : 'partial', 
-                    amountReceived: newAmountReceived.toFixed(2) 
-                }
+            // Atualiza também no paymentDetails.partners do projeto principal
+            if (!updatedPaymentDetails.partners) {
+                updatedPaymentDetails.partners = {};
+            }
+            updatedPaymentDetails.partners[userId] = { 
+                status: newAmountReceived >= totalToReceive ? 'paid' : 'partial', 
+                amountReceived: newAmountReceived.toFixed(2) 
             };
         }
 
         await project.update({ paymentDetails: updatedPaymentDetails }, { transaction: t });
         await t.commit();
+        
+        // Recarrega o projeto do banco de dados para retornar os dados mais recentes
         return this.findProjectById(projectId, userId);
+        
     } catch (error) {
         await t.rollback();
         throw error;
