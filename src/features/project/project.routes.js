@@ -6,6 +6,8 @@ const authMiddleware = require('../../middlewares/auth.middleware');
 router.use(authMiddleware);
 
 // Rotas de CRUD para Projetos
+// O prefixo '/projects' já é aplicado em src/routes/index.js,
+// então aqui usamos apenas '/' para a raiz e '/:id' para rotas específicas.
 router.post('/', projectController.create);
 router.get('/', projectController.findAll);
 router.get('/:id', projectController.findOne);
@@ -16,12 +18,13 @@ router.delete('/:id', projectController.delete);
 router.post('/:id/share', projectController.share);
 router.delete('/:id/share/:partnerId', projectController.stopSharing);
 
-// --- NOVA ROTA: Registrar recebimento do usuário logado ---
+// --- ROTA CORRIGIDA ---
 /**
  * @route   PATCH /api/projects/:id/register-receipt
  * @desc    Registra um valor como recebido pelo usuário logado (dono ou parceiro).
  * @access  Private
  */
-router.patch('/projects/:id/register-receipt', projectController.registerReceipt);
+// CORREÇÃO: Removido o prefixo '/projects'
+router.patch('/:id/register-receipt', projectController.registerReceipt);
 
 module.exports = router;
