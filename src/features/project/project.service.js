@@ -30,11 +30,9 @@ const checkClientPermission = async (clientId, userId) => {
  * Função auxiliar para calcular os valores financeiros para um projeto específico
  * COM BASE NO USUÁRIO LOGADO (dono ou parceiro).
  * Retorna um objeto com os cálculos.
- * RECEBE A INSTÂNCIA DO PROJETO COM TODAS AS ASSOCIAÇÕES JÁ CARREGADAS.
  */
 const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     // Garante que estamos trabalhando com um objeto "plain" do Sequelize
-    // E que as associações como ProjectShares e Partners estão presentes
     const project = projectInstance.get({ plain: true });
 
     const budget = parseFloat(project.budget || 0);
@@ -43,9 +41,10 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
 
     let netAmountAfterPlatform = budget - platformFee;
     let totalPartnersCommissionsValue = 0; 
-    let partnersCommissionsList = []; 
+    let partnersCommissionsList = []; // Lista para exibir no front-end
 
-    // Calcula a soma das comissões de todos os parceiros para o cálculo do lucro do DONO
+    // Calcula a soma das comissões de todos os parceiros
+    // project.ProjectShares é a lista direta de ProjectShare incluída no Project
     project.Partners?.forEach(partner => {
         const share = project.ProjectShares?.find(ps => ps.partnerId === partner.id);
         if (share) {
@@ -62,22 +61,20 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     let yourTotalToReceive = 0;
     let yourAmountReceived = 0;
     
-    // Calcula os valores para o usuário logado
+    // Se o usuário logado for o DONO
     if (project.ownerId === currentUserId) {
         yourTotalToReceive = ownerExpectedProfit;
         yourAmountReceived = parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
     } else { // Se o usuário logado for um PARCEIRO
-        const userAsPartner = project.Partners?.find(p => p.id === currentUserId);
-        if (userAsPartner) {
-            const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId);
-            if (partnerShare) {
-                if (partnerShare.commissionType === 'percentage') {
-                    yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
-                } else if (partnerShare.commissionType === 'fixed') {
-                    yourTotalToReceive = parseFloat(partnerShare.commissionValue);
-                }
-                yourAmountReceived = parseFloat(partnerShare.amountPaid || 0);
+        // Encontra o ProjectShare específico para o usuário logado como parceiro
+        const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId);
+        if (partnerShare) {
+            if (partnerShare.commissionType === 'percentage') {
+                yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
+            } else if (partnerShare.commissionType === 'fixed') {
+                yourTotalToReceive = parseFloat(partnerShare.commissionValue);
             }
+            yourAmountReceived = parseFloat(partnerShare.amountPaid || 0);
         }
     }
     const yourRemainingToReceive = yourTotalToReceive - yourAmountReceived;
@@ -176,15 +173,38 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     ]
   };
 
-  if (status && status !== 'all') { /* ... */ }
-  if (priorityId && priorityId !== 'all' && priorityId !== '') { /* ... */ }
-  if (clientId && clientId !== 'all' && clientId !== '') { /* ... */ }
-  if (platformId && platformId !== 'all' && platformId !== '') { /* ... */ }
+  if (status && status !== 'all') {
+    if (status === 'active') {
+      whereConditions.status = { [Op.in]: ['in_progress', 'paused', 'draft'] };
+    } else if (status === 'completed') {
+      whereConditions.status = 'completed';
+    }
+  }
+  
+  if (priorityId && priorityId !== 'all' && priorityId !== '') {
+      whereConditions.priorityId = parseInt(priorityId, 10);
+  }
+  if (clientId && clientId !== 'all' && clientId !== '') {
+      whereConditions.clientId = parseInt(clientId, 10);
+  }
+  if (platformId && platformId !== 'all' && platformId !== '') {
+      whereConditions.platformId = parseInt(platformId, 10);
+  }
+  
   if (minBudget && minBudget !== '') whereConditions.budget = { [Op.gte]: parseFloat(minBudget) };
-  if (maxBudget && maxBudget !== '') { /* ... */ }
+  if (maxBudget && maxBudget !== '') {
+      if (whereConditions.budget) {
+          whereConditions.budget[Op.lte] = parseFloat(maxBudget);
+      } else {
+          whereConditions.budget = { [Op.lte]: parseFloat(maxBudget) };
+      }
+  }
 
 
-  let orderClause = [['createdAt', 'DESC']]; /* ... */
+  let orderClause = [['createdAt', 'DESC']];
+  if (sortBy === 'budget') orderClause = [['budget', sortOrder === 'asc' ? 'ASC' : 'DESC']];
+  if (sortBy === 'deadline') orderClause = [['deadline', sortOrder === 'asc' ? 'ASC' : 'DESC']];
+  if (sortBy === 'name') orderClause = [['name', sortOrder === 'asc' ? 'ASC' : 'DESC']];
 
 
   const { count, rows: projects } = await Project.findAndCountAll({
@@ -206,7 +226,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS A CADA PROJETO ---
   const projectsWithFinancials = projects.map(project => {
-      // Passa a instância do projeto e o userId para calcular os financials para CADA PROJETO
+      // Passa o objeto project com todas as includes e o userId para calcular os financials para CADA PROJETO
       const financials = calculateProjectFinancialsForUser(project, userId);
       return { ...project.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
   });
@@ -215,8 +235,8 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   const summary = projectsWithFinancials.reduce((acc, project) => {
     acc.totalBudget += parseFloat(project.budget || 0);
     acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
-    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0);
-    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0);
+    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0); // Seu líquido total
+    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0); // O que você já recebeu
     return acc;
   }, { totalBudget: 0, totalReceived: 0, totalToReceive: 0, totalReceivedByOwner: 0 });
   
@@ -265,7 +285,7 @@ exports.findProjectById = async (projectId, userId) => {
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS AO PROJETO ÚNICO ---
   const financials = calculateProjectFinancialsForUser(projectInstance, userId);
-  return { ...projectInstance.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
+  return { ...projectInstance.get({ plain: true }), ...financials };
 };
 
 /**
