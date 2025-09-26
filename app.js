@@ -7,7 +7,8 @@ const recurrenceService = require('./src/features/recurrences/recurrence.service
 
 const mainRouter = require('./src/routes');
 const db = require('./src/models');
-const { sequelize, User, Priority } = db; // Pegar o modelo User também
+// CORREÇÃO: Importar o operador 'fn' e 'col' do sequelize para a nova função
+const { sequelize, User, Priority, Sequelize } = db; 
 
 const app = express();
 
@@ -23,14 +24,11 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 5001;
 
 /**
- * Função de seeding robusta:
- * 1. Procura por um usuário padrão.
- * 2. Se não existir, cria o usuário.
- * 3. Usa o ID do usuário (existente ou novo) para criar as prioridades padrão.
+ * Função para criar o usuário de teste padrão, se ele não existir.
+ * Isso é útil para ambientes de desenvolvimento e testes iniciais.
  */
-const seedDatabase = async () => {
+const seedTestUser = async () => {
   try {
-    // 1. Encontrar ou criar o usuário padrão
     const [user, created] = await User.findOrCreate({
       where: { email: 'teste@email.com' },
       defaults: {
@@ -43,36 +41,82 @@ const seedDatabase = async () => {
     if (created) {
       console.log('Usuário de teste padrão criado com sucesso!');
     }
-
-    const userId = user.id; // Pega o ID do usuário, seja ele novo ou existente
-
-    // 2. Verificar e criar as prioridades para este usuário
-    const count = await Priority.count({ where: { userId } });
-    if (count === 0) {
-      console.log(`Nenhuma prioridade encontrada para o usuário ${userId}. Criando prioridades padrão...`);
-      await Priority.bulkCreate([
-        { name: 'Alta', color: '#ef4444', order: 1, userId },
-        { name: 'Média', color: '#f59e0b', order: 2, userId },
-        { name: 'Baixa', color: '#6b7280', order: 3, userId },
-      ]);
-      console.log('Prioridades padrão criadas com sucesso!');
-    } else {
-      console.log(`Prioridades já existem para o usuário ${userId}.`);
-    }
   } catch (error) {
-    console.error('Erro ao semear o banco de dados:', error);
+    console.error('Erro ao semear o usuário de teste:', error);
   }
 };
+
+/**
+ * --- NOVA FUNÇÃO ---
+ * Garante que TODOS os usuários existentes que não possuem prioridades
+ * recebam as prioridades padrão. É mais eficiente e robusta.
+ */
+const seedPrioritiesForAllUsers = async () => {
+  try {
+    console.log('Iniciando verificação de prioridades para todos os usuários...');
+
+    // 1. Busca os IDs de todos os usuários existentes.
+    const allUsers = await User.findAll({ attributes: ['id'], raw: true });
+    if (allUsers.length === 0) {
+      console.log('Nenhum usuário no banco. Pulando criação de prioridades.');
+      return;
+    }
+    const allUserIds = allUsers.map(u => u.id);
+
+    // 2. Busca de forma eficiente os IDs de usuários que JÁ TÊM prioridades.
+    const usersWithPrioritiesResult = await Priority.findAll({
+      attributes: [[Sequelize.fn('DISTINCT', Sequelize.col('userId')), 'userId']],
+      raw: true
+    });
+    const usersWithPrioritiesIds = new Set(usersWithPrioritiesResult.map(p => p.userId));
+
+    // 3. Filtra para encontrar apenas os usuários que PRECISAM de prioridades.
+    const usersWhoNeedPriorities = allUserIds.filter(id => !usersWithPrioritiesIds.has(id));
+
+    if (usersWhoNeedPriorities.length === 0) {
+      console.log('Todos os usuários já possuem prioridades.');
+      return;
+    }
+
+    console.log(`Encontrados ${usersWhoNeedPriorities.length} usuários sem prioridades. Criando agora...`);
+
+    // 4. Prepara a lista de prioridades para serem criadas em massa (bulkCreate).
+    const prioritiesToCreate = [];
+    const defaultPriorities = [
+      { name: 'Alta', color: '#ef4444', order: 1 },
+      { name: 'Média', color: '#f59e0b', order: 2 },
+      { name: 'Baixa', color: '#6b7280', order: 3 },
+    ];
+
+    // Adiciona o conjunto de prioridades padrão para cada usuário que precisa.
+    usersWhoNeedPriorities.forEach(userId => {
+      defaultPriorities.forEach(priority => {
+        prioritiesToCreate.push({ ...priority, userId });
+      });
+    });
+
+    // 5. Executa a criação em massa, que é muito mais performática.
+    await Priority.bulkCreate(prioritiesToCreate);
+
+    console.log(`Prioridades padrão criadas com sucesso para ${usersWhoNeedPriorities.length} usuários.`);
+
+  } catch (error) {
+    console.error('Erro crítico ao semear prioridades para todos os usuários:', error);
+  }
+};
+
 
 // Sincronizar banco de dados e iniciar servidor
 // Use `force: true` APENAS em desenvolvimento para recriar as tabelas
 sequelize.sync({ force: false }) 
-  .then(async () => { // Usar async aqui
+  .then(async () => {
     console.log('Banco de dados sincronizado com sucesso!');
     
-    await seedDatabase(); // Aguarda o seeding do usuário/prioridades
+    // Roda as funções de seeding (criação de dados iniciais)
+    await seedTestUser();
+    await seedPrioritiesForAllUsers(); // <-- NOVA CHAMADA AQUI
 
-    // --- NOVA CHAMADA: Gerar lançamentos previstos iniciais ---
+    // --- Gerar lançamentos previstos iniciais ---
     await recurrenceService.generateInitialForecasts();
 
     app.listen(PORT, () => {

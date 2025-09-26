@@ -311,7 +311,7 @@ exports.updateProject = async (projectId, updateData, userId) => {
 
   const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData;
 
-  const finalPriorityId = priorityId === '' || priorityId === undefined ? null : parseInt(priorityId, 10);
+  const finalPriorityId = priorityId === '' || priorityId === undefined || priorityId === null ? null : parseInt(priorityId, 10);
   
   if (tagIds) {
     const tags = await Tag.findAll({ where: { id: tagIds, userId: projectInstance.ownerId } });
