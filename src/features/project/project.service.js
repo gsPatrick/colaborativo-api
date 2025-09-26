@@ -30,13 +30,11 @@ const checkClientPermission = async (clientId, userId) => {
  * Função auxiliar para calcular os valores financeiros para um projeto específico
  * COM BASE NO USUÁRIO LOGADO (dono ou parceiro).
  * Retorna um objeto com os cálculos.
- *
- * @param {object} projectInstance - A instância do Project do Sequelize (com includes).
- * @param {number} currentUserId - O ID do usuário logado.
- * @returns {object} Objeto com os cálculos financeiros formatados.
+ * RECEBE A INSTÂNCIA DO PROJETO COM TODAS AS ASSOCIAÇÕES JÁ CARREGADAS.
  */
 const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     // Garante que estamos trabalhando com um objeto "plain" do Sequelize
+    // E que as associações como ProjectShares e Partners estão presentes
     const project = projectInstance.get({ plain: true });
 
     const budget = parseFloat(project.budget || 0);
@@ -47,9 +45,9 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     let totalPartnersCommissionsValue = 0; 
     let partnersCommissionsList = []; 
 
-    // --- CORREÇÃO AQUI: Usa project.Partners e o ProjectShare ANINHADO a ele ---
+    // Calcula a soma das comissões de todos os parceiros para o cálculo do lucro do DONO
     project.Partners?.forEach(partner => {
-        const share = partner.ProjectShare; // ProjectShare já está aninhado em cada Partner
+        const share = project.ProjectShares?.find(ps => ps.partnerId === partner.id);
         if (share) {
             const partnerExpectedAmount = share.commissionType === 'percentage'
                 ? netAmountAfterPlatform * (parseFloat(share.commissionValue) / 100)
@@ -64,14 +62,14 @@ const calculateProjectFinancialsForUser = (projectInstance, currentUserId) => {
     let yourTotalToReceive = 0;
     let yourAmountReceived = 0;
     
-    // Se o usuário logado for o DONO
+    // Calcula os valores para o usuário logado
     if (project.ownerId === currentUserId) {
         yourTotalToReceive = ownerExpectedProfit;
         yourAmountReceived = parseFloat(project.paymentDetails?.owner?.amountReceived || 0);
     } else { // Se o usuário logado for um PARCEIRO
         const userAsPartner = project.Partners?.find(p => p.id === currentUserId);
         if (userAsPartner) {
-            const partnerShare = userAsPartner.ProjectShare; // Acessa o ProjectShare aninhado
+            const partnerShare = project.ProjectShares?.find(ps => ps.partnerId === currentUserId);
             if (partnerShare) {
                 if (partnerShare.commissionType === 'percentage') {
                     yourTotalToReceive = netAmountAfterPlatform * (parseFloat(partnerShare.commissionValue) / 100);
@@ -155,20 +153,7 @@ exports.createProject = async (projectData, ownerId) => {
     await project.setTags(tags);
   }
 
-  // Retorna o projeto com todos os includes para que calculateProjectFinancialsForUser funcione
-  const createdProjectWithIncludes = await Project.findByPk(project.id, {
-    include: [
-        { model: User, as: 'Owner', attributes: ['id', 'name'] },
-        { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
-        { model: db.Priority, attributes: ['id', 'name', 'color'] },
-        { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-        { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
-        { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] },
-        { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
-    ]
-  });
-  const financials = calculateProjectFinancialsForUser(createdProjectWithIncludes, ownerId);
-  return { ...createdProjectWithIncludes.get({ plain: true }), ...financials };
+  return this.findProjectById(project.id, ownerId);
 };
 
 /**
@@ -198,7 +183,9 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   if (minBudget && minBudget !== '') whereConditions.budget = { [Op.gte]: parseFloat(minBudget) };
   if (maxBudget && maxBudget !== '') { /* ... */ }
 
+
   let orderClause = [['createdAt', 'DESC']]; /* ... */
+
 
   const { count, rows: projects } = await Project.findAndCountAll({
     where: whereConditions,
@@ -207,10 +194,8 @@ exports.findAllProjectsForUser = async (userId, filters) => {
       { model: Client, attributes: ['id', 'legalName', 'tradeName'] },
       { model: db.Priority, attributes: ['id', 'name', 'color'] },
       { model: Tag, through: { attributes: [] }, attributes: ['id', 'name'] },
-      // --- Inclui Partners e ProjectShare ANINHADO ao Partner ---
       { model: User, as: 'Partners', attributes: ['id', 'name'], through: { model: ProjectShare, as: 'ProjectShare', attributes: ['commissionType', 'commissionValue', 'permissions', 'paymentStatus', 'amountPaid'] } },
       { model: Platform, as: 'AssociatedPlatform', attributes: ['id', 'name', 'logoUrl', 'defaultCommissionPercent'] },
-      // --- Inclui ProjectShare diretamente para calculateProjectFinancialsForUser ---
       { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
     ],
     order: orderClause,
@@ -221,6 +206,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS A CADA PROJETO ---
   const projectsWithFinancials = projects.map(project => {
+      // Passa a instância do projeto e o userId para calcular os financials para CADA PROJETO
       const financials = calculateProjectFinancialsForUser(project, userId);
       return { ...project.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
   });
@@ -229,8 +215,8 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   const summary = projectsWithFinancials.reduce((acc, project) => {
     acc.totalBudget += parseFloat(project.budget || 0);
     acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
-    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0); // Seu líquido total
-    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0); // O que você já recebeu
+    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0);
+    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0);
     return acc;
   }, { totalBudget: 0, totalReceived: 0, totalToReceive: 0, totalReceivedByOwner: 0 });
   
@@ -258,7 +244,7 @@ exports.findAllProjectsForUser = async (userId, filters) => {
  * AGORA TAMBÉM INCLUI OS CÁLCULOS FINANCEIROS PARA O USUÁRIO LOGADO.
  */
 exports.findProjectById = async (projectId, userId) => {
-  const project = await Project.findByPk(projectId, {
+  const projectInstance = await Project.findByPk(projectId, {
     include: [
         { model: User, as: 'Owner', attributes: ['id', 'name'] },
         { model: Client }, 
@@ -270,49 +256,56 @@ exports.findProjectById = async (projectId, userId) => {
         { model: ProjectShare, as: 'ProjectShares', attributes: ['commissionType', 'commissionValue', 'paymentStatus', 'amountPaid'] }
     ]
   });
-  if (!project) throw new Error("Projeto não encontrado.");
-  const isOwner = project.ownerId === userId;
-  const isPartner = project.Partners.some(p => p.id === userId);
+  if (!projectInstance) throw new Error("Projeto não encontrado.");
+  const isOwner = projectInstance.ownerId === userId;
+  const isPartner = projectInstance.Partners.some(p => p.id === userId);
   if (!isOwner && !isPartner) {
     throw new Error("Acesso negado. Você não tem permissão para ver este projeto.");
   }
 
   // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS AO PROJETO ÚNICO ---
-  const financials = calculateProjectFinancialsForUser(project, userId);
-  return { ...project.get({ plain: true }), ...financials };
+  const financials = calculateProjectFinancialsForUser(projectInstance, userId);
+  return { ...projectInstance.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
 };
 
 /**
  * Atualiza um projeto.
  */
 exports.updateProject = async (projectId, updateData, userId) => {
-  const project = await this.findProjectById(projectId, userId);
-  const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData;
+  const projectInstance = await Project.findByPk(projectId, { 
+      include: [
+          { model: User, as: 'Partners', through: { model: ProjectShare, as: 'ProjectShare' } },
+          { model: ProjectShare, as: 'ProjectShares' }
+      ]
+  });
 
-  const shareInfo = await ProjectShare.findOne({ where: { projectId, partnerId: userId } });
-  const isOwner = project.ownerId === userId;
+  if (!projectInstance) throw new Error("Projeto não encontrado.");
+
+  const shareInfo = projectInstance.ProjectShares?.find(ps => ps.partnerId === userId);
+  const isOwner = projectInstance.ownerId === userId;
   const canEdit = isOwner || (shareInfo && shareInfo.permissions === 'edit');
 
   if (!canEdit) {
     throw new Error("Acesso negado. Você não tem permissão para editar este projeto.");
   }
 
+  const { tagIds, priorityId, partnerId, commissionType, commissionValue, ...restOfData } = updateData;
+
   const finalPriorityId = priorityId === '' || priorityId === undefined ? null : parseInt(priorityId, 10);
   
   if (tagIds) {
-    const tags = await Tag.findAll({ where: { id: tagIds, userId: project.ownerId } });
-    await project.setTags(tags);
+    const tags = await Tag.findAll({ where: { id: tagIds, userId: projectInstance.ownerId } });
+    await projectInstance.setTags(tags);
   }
 
-  // --- Lógica para atualizar a comissão de parceria ---
-  if (partnerId) { // Se um parceiro foi selecionado/mantido
-      const existingPartnerShare = await ProjectShare.findOne({ where: { projectId: project.id, partnerId: partnerId } });
+  if (partnerId) {
+      const existingPartnerShare = await ProjectShare.findOne({ where: { projectId: projectInstance.id, partnerId: partnerId } });
       if (existingPartnerShare) {
           await existingPartnerShare.update({ commissionType, commissionValue: parseFloat(commissionValue) });
-      } else { // Se for um NOVO parceiro adicionado via edição
+      } else {
           const partner = await User.findByPk(partnerId);
           if (!partner) throw new Error("Parceiro de colaboração não encontrado.");
-          await project.addPartner(partner, {
+          await projectInstance.addPartner(partner, {
               through: { 
                 commissionType, 
                 commissionValue: parseFloat(commissionValue), 
@@ -322,65 +315,79 @@ exports.updateProject = async (projectId, updateData, userId) => {
               } 
           });
       }
-  } else if (!partnerId && project.Partners && project.Partners.length > 0) {
-      // Se o parceiro foi removido do formulário (e havia um), remove a associação
-      // Para múltiplos parceiros, o front-end precisaria gerenciar qual remover.
-      for (const p of project.Partners) {
-          await project.removePartner(p.id);
+  } else if (!partnerId && projectInstance.Partners && projectInstance.Partners.length > 0) {
+      for (const p of projectInstance.Partners) {
+          await projectInstance.removePartner(p.id);
       }
   }
 
-  await project.update({ ...restOfData, priorityId: finalPriorityId });
+  await projectInstance.update({ ...restOfData, priorityId: finalPriorityId });
   return this.findProjectById(projectId, userId);
 };
 
 /**
- * Deleta um projeto.
+ * Registra um valor como recebido pelo usuário logado (dono ou parceiro).
  */
-exports.deleteProject = async (projectId, userId) => {
-  const project = await Project.findByPk(projectId);
-  if (!project) throw new Error("Projeto não encontrado.");
-  if (project.ownerId !== userId) {
-    throw new Error("Acesso negado. Apenas o proprietário pode deletar um projeto.");
-  }
-  await project.destroy();
-  return { message: "Projeto deletado com sucesso." };
-};
+exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = false) => {
+    const t = await db.sequelize.transaction();
+    try {
+        const project = await Project.findByPk(projectId, { 
+            include: [
+                { model: ProjectShare, as: 'ProjectShares' },
+                { model: User, as: 'Partners', through: { model: ProjectShare, as: 'ProjectShare' } }
+            ] 
+        });
+        if (!project) throw new Error("Projeto não encontrado.");
 
-/**
- * Compartilha um projeto com um colaborador aceito.
- */
-exports.shareProject = async (projectId, ownerId, shareData) => {
-    const { partnerEmail, commissionType, commissionValue, permissions } = shareData;
-    if (!partnerEmail || !commissionType || commissionValue == null) {
-        throw new Error("Dados para compartilhamento incompletos.");
-    }
-    const project = await Project.findByPk(projectId);
-    if (!project || project.ownerId !== ownerId) {
-        throw new Error("Projeto não encontrado ou você não é o proprietário.");
-    }
-    const partner = await User.findOne({ where: { email: partnerEmail } });
-    if (!partner) throw new Error("Colaborador não encontrado.");
-    if (partner.id === ownerId) throw new Error("Você não pode compartilhar um projeto consigo mesmo.");
-    const collaboration = await Collaboration.findOne({
-        where: { status: 'accepted', [Op.or]: [{ requesterId: ownerId, addresseeId: partner.id }, { requesterId: partner.id, addresseeId: owner.id }] }
-    });
-    if (!collaboration) throw new Error("Você só pode compartilhar projetos com colaboradores aceitos.");
-    await project.addPartner(partner, { through: { commissionType, commissionValue, permissions: permissions || 'read' } });
-    return { message: `Projeto compartilhado com ${partner.name}.` };
-};
+        const isOwner = project.ownerId === userId;
+        const partnerShareEntry = project.ProjectShares?.find(ps => ps.partnerId === userId);
 
-/**
- * Para de compartilhar um projeto com um parceiro.
- */
-exports.stopSharingProject = async (projectId, ownerId, partnerId) => {
-    const project = await Project.findByPk(projectId);
-    if (!project || project.ownerId !== ownerId) {
-        throw new Error("Projeto não encontrado ou você não é o proprietário.");
+        if (!isOwner && !partnerShareEntry) {
+            throw new Error("Acesso negado. Você não é o dono nem um parceiro deste projeto.");
+        }
+
+        let updatedPaymentDetails = { ...project.paymentDetails };
+
+        // --- LÓGICA DE ATUALIZAÇÃO DO RECEBIMENTO DO USUÁRIO ---
+        if (isOwner) {
+            const financials = calculateProjectFinancialsForUser(project, userId);
+            const currentReceived = parseFloat(updatedPaymentDetails.owner.amountReceived || 0);
+            const totalToReceive = parseFloat(financials.yourTotalToReceive);
+            
+            let newAmountReceived = currentReceived + parseFloat(amount || 0);
+            if (isFullPayment) newAmountReceived = totalToReceive;
+
+            updatedPaymentDetails.owner.amountReceived = newAmountReceived.toFixed(2);
+            updatedPaymentDetails.owner.status = newAmountReceived >= totalToReceive ? 'paid' : 'partial';
+
+        } else if (partnerShareEntry) { // É um parceiro
+            const financials = calculateProjectFinancialsForUser(project, userId);
+            const currentReceived = parseFloat(partnerShareEntry.amountPaid || 0);
+            const totalToReceive = parseFloat(financials.yourTotalToReceive);
+
+            let newAmountReceived = currentReceived + parseFloat(amount || 0);
+            if (isFullPayment) newAmountReceived = totalToReceive;
+
+            await partnerShareEntry.update({
+                amountPaid: newAmountReceived.toFixed(2),
+                paymentStatus: newAmountReceived >= totalToReceive ? 'paid' : 'partial'
+            }, { transaction: t });
+
+            // Atualiza também no paymentDetails.partners do projeto principal
+            updatedPaymentDetails.partners = {
+                ...updatedPaymentDetails.partners,
+                [userId]: { 
+                    status: newAmountReceived >= totalToReceive ? 'paid' : 'partial', 
+                    amountReceived: newAmountReceived.toFixed(2) 
+                }
+            };
+        }
+
+        await project.update({ paymentDetails: updatedPaymentDetails }, { transaction: t });
+        await t.commit();
+        return this.findProjectById(projectId, userId);
+    } catch (error) {
+        await t.rollback();
+        throw error;
     }
-    const partner = await User.findByPk(partnerId);
-    if (!partner) throw new Error("Parceiro não encontrado.");
-    const result = await project.removePartner(partner);
-    if (result === 0) throw new Error("Este projeto não estava compartilhado com o usuário especificado.");
-    return { message: "Compartilhamento do projeto removido." };
 };
