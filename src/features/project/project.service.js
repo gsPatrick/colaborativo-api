@@ -1,3 +1,5 @@
+// src/features/project/project.service.js
+
 const db = require('../../models');
 const { Op } = require('sequelize');
 
@@ -120,7 +122,9 @@ exports.createProject = async (projectData, ownerId) => {
     name,
     clientId: finalClientId,
     ownerId,
-    platformId: platformId === '' ? null : parseInt(platformId, 10),
+    // --- CORREÇÃO AQUI ---
+    // Esta nova lógica é mais simples e trata 'null', 'undefined' e '' corretamente.
+    platformId: platformId ? parseInt(platformId, 10) : null,
     platformCommissionPercent: platformCommissionPercent || 0,
     ownerCommissionType: ownerCommissionType || null,
     ownerCommissionValue: ownerCommissionValue || 0,
@@ -152,6 +156,8 @@ exports.createProject = async (projectData, ownerId) => {
 
   return this.findProjectById(project.id, ownerId);
 };
+
+// --- O RESTANTE DO ARQUIVO CONTINUA IGUAL ---
 
 /**
  * Lista todos os projetos de um usuário com filtros, paginação e sumário.
@@ -224,19 +230,16 @@ exports.findAllProjectsForUser = async (userId, filters) => {
     distinct: true
   });
 
-  // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS A CADA PROJETO ---
   const projectsWithFinancials = projects.map(project => {
-      // Passa o objeto project com todas as includes e o userId para calcular os financials para CADA PROJETO
       const financials = calculateProjectFinancialsForUser(project, userId);
-      return { ...project.get({ plain: true }), ...financials }; // Garante que seja um objeto plano para o frontend
+      return { ...project.get({ plain: true }), ...financials };
   });
 
-  // Recalcula o sumário FINAL baseado nos projectsWithFinancials
   const summary = projectsWithFinancials.reduce((acc, project) => {
     acc.totalBudget += parseFloat(project.budget || 0);
     acc.totalReceived += parseFloat(project.paymentDetails?.client?.amountPaid || 0);
-    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0); // Seu líquido total
-    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0); // O que você já recebeu
+    acc.totalToReceive += parseFloat(project.yourTotalToReceive || 0);
+    acc.totalReceivedByOwner += parseFloat(project.yourAmountReceived || 0);
     return acc;
   }, { totalBudget: 0, totalReceived: 0, totalToReceive: 0, totalReceivedByOwner: 0 });
   
@@ -246,22 +249,21 @@ exports.findAllProjectsForUser = async (userId, filters) => {
   return {
     summary: {
         totalBudget: summary.totalBudget,
-        totalReceived: summary.totalReceived, // Total recebido do cliente (que vai para o ProjectCard)
-        totalToReceive: summary.totalToReceive, // Seu Líquido a Receber (que vai para o ProjectCard)
-        remainingToReceive: summary.remainingToReceive // Seu Líquido Restante (que vai para o ProjectCard)
+        totalReceived: summary.totalReceived,
+        totalToReceive: summary.totalToReceive,
+        remainingToReceive: summary.remainingToReceive
     },
     pagination: {
       totalProjects: count,
       totalPages: Math.ceil(count / limit),
       currentPage: parseInt(page, 10)
     },
-    projects: projectsWithFinancials // Retorna os projetos com os cálculos anexados
+    projects: projectsWithFinancials
   };
 };
 
 /**
  * Busca um projeto pelo ID, validando a permissão do usuário.
- * AGORA TAMBÉM INCLUI OS CÁLCULOS FINANCEIROS PARA O USUÁRIO LOGADO.
  */
 exports.findProjectById = async (projectId, userId) => {
   const projectInstance = await Project.findByPk(projectId, {
@@ -283,7 +285,6 @@ exports.findProjectById = async (projectId, userId) => {
     throw new Error("Acesso negado. Você não tem permissão para ver este projeto.");
   }
 
-  // --- CORREÇÃO AQUI: ANEXA OS CÁLCULOS FINANCEIROS AO PROJETO ÚNICO ---
   const financials = calculateProjectFinancialsForUser(projectInstance, userId);
   return { ...projectInstance.get({ plain: true }), ...financials };
 };
@@ -368,7 +369,6 @@ exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = 
 
         let updatedPaymentDetails = { ...project.paymentDetails };
 
-        // --- LÓGICA DE ATUALIZAÇÃO DO RECEBIMENTO DO USUÁRIO ---
         if (isOwner) {
             const financials = calculateProjectFinancialsForUser(project, userId);
             const currentReceived = parseFloat(updatedPaymentDetails.owner.amountReceived || 0);
@@ -380,7 +380,7 @@ exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = 
             updatedPaymentDetails.owner.amountReceived = newAmountReceived.toFixed(2);
             updatedPaymentDetails.owner.status = newAmountReceived >= totalToReceive ? 'paid' : 'partial';
 
-        } else if (partnerShareEntry) { // É um parceiro
+        } else if (partnerShareEntry) {
             const financials = calculateProjectFinancialsForUser(project, userId);
             const currentReceived = parseFloat(partnerShareEntry.amountPaid || 0);
             const totalToReceive = parseFloat(financials.yourTotalToReceive);
@@ -393,7 +393,6 @@ exports.registerUserReceipt = async (projectId, userId, amount, isFullPayment = 
                 paymentStatus: newAmountReceived >= totalToReceive ? 'paid' : 'partial'
             }, { transaction: t });
 
-            // Atualiza também no paymentDetails.partners do projeto principal
             updatedPaymentDetails.partners = {
                 ...updatedPaymentDetails.partners,
                 [userId]: { 
